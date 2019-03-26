@@ -831,7 +831,7 @@ func (args *params) fill(gq *gql.GraphQuery) error {
 		args.AfterUID = uint64(after)
 	}
 
-	if args.Alias == "shortest" {
+	if args.Alias == "shortest" || args.Alias == "helloshortest" {
 		if v, ok := gq.Args["depth"]; ok {
 			depth, err := strconv.ParseUint(v, 0, 64)
 			if err != nil {
@@ -2580,7 +2580,7 @@ func (req *QueryRequest) ProcessQuery(ctx context.Context) (err error) {
 		gq := queries[i]
 
 		if gq == nil || (len(gq.UID) == 0 && gq.Func == nil && len(gq.NeedsVar) == 0 &&
-			gq.Alias != "shortest" && !gq.IsEmpty) {
+			gq.Alias != "helloshortest" && gq.Alias != "shortest" && !gq.IsEmpty) {
 			return x.Errorf("Invalid query. No function used at root and no aggregation" +
 				" or math variables found in the body.")
 		}
@@ -2656,6 +2656,12 @@ func (req *QueryRequest) ProcessQuery(ctx context.Context) (err error) {
 				// We allow only one shortest path block per query.
 				go func() {
 					shortestSg, err = ShortestPath(ctx, sg)
+					errChan <- err
+				}()
+			} else if sg.Params.Alias == "helloshortest" {
+				// hello shortest
+				go func() {
+					shortestSg, err = HelloShortestPath(ctx, sg)
 					errChan <- err
 				}()
 			} else if sg.Params.Recurse {

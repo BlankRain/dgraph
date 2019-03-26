@@ -554,7 +554,7 @@ func Parse(r Request) (res Result, rerr error) {
 func validateResult(res *Result) error {
 	seenQueryAliases := make(map[string]bool)
 	for _, q := range res.Query {
-		if q.Alias == "var" || q.Alias == "shortest" {
+		if q.Alias == "var" || q.Alias == "shortest" || q.Alias == "helloshortest" {
 			continue
 		}
 		if _, found := seenQueryAliases[q.Alias]; found {

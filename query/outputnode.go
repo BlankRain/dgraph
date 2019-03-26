@@ -42,7 +42,7 @@ const (
 func ToJson(l *Latency, sgl []*SubGraph) ([]byte, error) {
 	sgr := &SubGraph{}
 	for _, sg := range sgl {
-		if sg.Params.Alias == "var" || sg.Params.Alias == "shortest" {
+		if sg.Params.Alias == "var" || sg.Params.Alias == "shortest" || sg.Params.Alias == "helloshortest" {
 			continue
 		}
 		if sg.Params.GetUid {
