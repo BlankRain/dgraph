@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +137,7 @@ func processWithBackupRequest(
 // the instance which stores posting list corresponding to the predicate in the
 // query.
 func ProcessTaskOverNetwork(ctx context.Context, q *pb.Query) (*pb.Result, error) {
+	log.Printf("task query is %v", q)
 	attr := q.Attr
 	gid, err := groups().BelongsToReadOnly(attr)
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	"math"
 
 	"github.com/dgraph-io/dgraph/protos/pb"
+	"github.com/dgraph-io/dgraph/worker"
 	"github.com/dgraph-io/dgraph/x"
 )
 
@@ -35,7 +36,17 @@ func HelloShortestPath(ctx context.Context, sg *SubGraph) ([]*SubGraph, error) {
 	// return only one path
 	pq := make(priorityQueue, 0)
 	heap.Init(&pq)
-
+	q1 := &pb.Query{
+		Attr:      "name",
+		ExpandAll: true,
+		UidList:   &pb.List{Uids: []uint64{sg.Params.From}},
+		ReadTs:    sg.ReadTs,
+	}
+	r1, err := worker.ProcessTaskOverNetwork(ctx, q1)
+	if err != nil {
+		fmt.Println("worker error:", err)
+	}
+	fmt.Println("result: ", r1)
 	// Initialize and push the source node.
 	srcNode := &Item{
 		uid:  sg.Params.From,

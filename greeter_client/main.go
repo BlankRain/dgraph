@@ -72,14 +72,14 @@ func main() {
 		Attr:      "name",
 		ExpandAll: true,
 		UidList:   newList([]uint64{0x1, 2, 3, 4}),
-		ReadTs:    0,
+		ReadTs:    70086,
 	}
 	q2 := &pb.Query{
 		Attr: "name",
 		SrcFunc: &pb.SrcFunction{
 			Name: "has",
 		},
-		ReadTs: 0,
+		ReadTs: 70086,
 	}
 	doQuery(client, q1)
 	doQuery(client, q2)
