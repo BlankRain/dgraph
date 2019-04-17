@@ -166,18 +166,19 @@ var filterOpPrecedence = map[string]int{
 	"or":  1,
 }
 var mathOpPrecedence = map[string]int{
-	"u-":      500,
-	"floor":   105,
-	"ceil":    104,
-	"since":   103,
-	"exp":     100,
-	"ln":      99,
-	"sqrt":    98,
-	"cond":    90,
-	"pow":     89,
-	"logbase": 88,
-	"max":     85,
-	"min":     84,
+	"u-":         500,
+	"nodedegree": 106,
+	"floor":      105,
+	"ceil":       104,
+	"since":      103,
+	"exp":        100,
+	"ln":         99,
+	"sqrt":       98,
+	"cond":       90,
+	"pow":        89,
+	"logbase":    88,
+	"max":        85,
+	"min":        84,
 
 	"/": 50,
 	"*": 49,
@@ -630,6 +631,9 @@ func (gq *GraphQuery) collectVars(v *Vars) {
 
 func (f *MathTree) collectVars(v *Vars) {
 	if f == nil {
+		return
+	}
+	if isUnLimited(f.Fn) {
 		return
 	}
 	if f.Var != "" {

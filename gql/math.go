@@ -74,6 +74,10 @@ func isTernary(f string) bool {
 	return f == "cond"
 }
 
+func isUnLimited(f string) bool {
+	return f == "nodedegree"
+}
+
 func isZero(f string, rval types.Val) bool {
 	if rval.Tid != types.FloatID {
 		return false
@@ -121,6 +125,12 @@ func evalMathStack(opStack, valueStack *mathTreeStack) error {
 		topVal3 := valueStack.popAssert()
 		topOp.Child = []*MathTree{topVal3, topVal2, topVal1}
 
+	} else if isUnLimited(topOp.Fn) {
+		c := []*MathTree{}
+		for !valueStack.empty() {
+			c = append(c, valueStack.popAssert())
+		}
+		topOp.Child = c
 	} else {
 		if valueStack.size() < 2 {
 			return x.Errorf("Invalid Math expression. Expected 2 operands")
@@ -146,7 +156,7 @@ func isMathFunc(f string) bool {
 		f == "==" || f == "!=" ||
 		f == "min" || f == "max" || f == "sqrt" ||
 		f == "pow" || f == "logbase" || f == "floor" || f == "ceil" ||
-		f == "since"
+		f == "since" || f == "nodedegree"
 }
 
 func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
