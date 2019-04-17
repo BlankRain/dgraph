@@ -17,6 +17,8 @@
 package query
 
 import (
+	"fmt"
+
 	"github.com/dgraph-io/dgraph/types"
 	"github.com/dgraph-io/dgraph/x"
 	"github.com/golang/glog"
@@ -210,6 +212,20 @@ func processTernary(mNode *mathTree) error {
 	return nil
 }
 
+func processUnLimited(mNode *mathTree) error {
+	destMap := make(map[uint64]types.Val)
+	srcMap := mNode.Child[0].Val
+	fmt.Println("unlimit:", mNode, srcMap)
+	for k := uint64(0x01); k < uint64(0x04); k++ {
+		destMap[k] = types.Val{
+			Value: int64(3 * k),
+			Tid:   types.IntID,
+		}
+	}
+	mNode.Val = destMap
+	return nil
+}
+
 func evalMathTree(mNode *mathTree) error {
 	if mNode.Const.Value != nil {
 		return nil
@@ -263,5 +279,8 @@ func evalMathTree(mNode *mathTree) error {
 		return processTernary(mNode)
 	}
 
+	if isUnLimited(aggName) {
+		return processUnLimited(mNode)
+	}
 	return x.Errorf("Unhandled Math operator: %v", aggName)
 }

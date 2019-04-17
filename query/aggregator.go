@@ -51,6 +51,10 @@ func isBinary(f string) bool {
 		f == "max" || f == "min" || f == "logbase" || f == "pow"
 }
 
+func isUnLimited(f string) bool {
+	return f == "nodedegree"
+}
+
 func convertTo(from *pb.TaskValue) (types.Val, error) {
 	vh, _ := getValue(from)
 	if bytes.Equal(from.Val, x.Nilbyte) {
