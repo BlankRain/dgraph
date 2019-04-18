@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dgraph-io/dgraph/ext"
 	"github.com/dgraph-io/dgraph/lex"
 	"github.com/dgraph-io/dgraph/protos/pb"
 	"github.com/dgraph-io/dgraph/x"
@@ -632,7 +633,7 @@ func (f *MathTree) collectVars(v *Vars) {
 	if f == nil {
 		return
 	}
-	if isUnLimited(f.Fn) {
+	if ext.HasProcessFunc(f.Fn) {
 		return
 	}
 	if f.Var != "" {

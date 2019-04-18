@@ -75,9 +75,6 @@ func isTernary(f string) bool {
 	return f == "cond"
 }
 
-func isUnLimited(f string) bool {
-	return ext.HasProcessFunc(f)
-}
 func pickMathOpPrecedence(op string) int {
 	if v, ok := mathOpPrecedence[op]; ok {
 		return v
@@ -131,7 +128,7 @@ func evalMathStack(opStack, valueStack *mathTreeStack) error {
 		topVal3 := valueStack.popAssert()
 		topOp.Child = []*MathTree{topVal3, topVal2, topVal1}
 
-	} else if isUnLimited(topOp.Fn) {
+	} else if ext.HasProcessFunc(topOp.Fn) {
 		c := []*MathTree{}
 		for !valueStack.empty() {
 			c = append(c, valueStack.popAssert())
