@@ -13,7 +13,7 @@ type ParamTree struct {
 }
 type ProcessFuncParam struct {
 	Context     context.Context
-	ReadTS      uint64
+	ReadTs      uint64
 	FuncName    string
 	SrcUids     *pb.List
 	ParamLabels []string

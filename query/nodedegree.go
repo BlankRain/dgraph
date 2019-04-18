@@ -18,7 +18,7 @@ func NodeDegree(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 		destMap[uid] = 0
 	}
 	for _, edgePred := range param.ParamLabels {
-		err := doComputeNodeOutDegree(param.Context, param.SrcUids, edgePred, param.ReadTS, destMap)
+		err := doComputeNodeOutDegree(param.Context, param.SrcUids, edgePred, param.ReadTs, destMap)
 		if err != nil {
 			log.Printf("error when compute node outdegree %v", err)
 			return nil, err
