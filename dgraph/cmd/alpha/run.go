@@ -36,6 +36,7 @@ import (
 
 	"github.com/dgraph-io/dgo/protos/api"
 	"github.com/dgraph-io/dgraph/edgraph"
+	"github.com/dgraph-io/dgraph/ext/reg"
 	"github.com/dgraph-io/dgraph/posting"
 	"github.com/dgraph-io/dgraph/schema"
 	"github.com/dgraph-io/dgraph/tok"
@@ -567,6 +568,8 @@ func run() {
 	aclCloser := y.NewCloser(1)
 	go func() {
 		worker.StartRaftNodes(edgraph.State.WALstore, bindall)
+
+		reg.Init()
 		// initialization of the admin account can only be done after raft nodes are running
 		// and health check passes
 		edgraph.ResetAcl()
