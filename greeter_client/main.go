@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -35,24 +36,29 @@ const (
 func newList(data []uint64) *pb.List {
 	return &pb.List{Uids: data}
 }
-func doQuery(client pb.WorkerClient, q *pb.Query) {
+func doQuery(client pb.WorkerClient, q *pb.Query) *pb.Result {
+	fmt.Println()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ret, err := client.ServeTask(ctx, q)
 	if err != nil {
 		log.Fatalf("error in query: %v", err)
-		return
+		return nil
 	}
-	// log.Printf("%v", ret)
+	log.Printf("%v", ret)
 	for i, v := range ret.UidMatrix {
-		log.Printf("%d %v", i, v)
+		log.Printf("uid @%d : %v", i, v)
 	}
 	for i, v := range ret.ValueMatrix {
-		log.Printf("value :%d %v", i, v)
+		log.Printf("value @%d : %v", i, v)
 	}
+	for i, v := range ret.Counts {
+		log.Printf("count @%d : %v", i, v)
+	}
+	return ret
 
 }
-func main() {
+func grpcdemo() {
 	// Set up a connection to the server.
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
@@ -67,35 +73,28 @@ func main() {
 		newList([]uint64{2, 4, 5, 7, 15}),
 	}
 	log.Printf("%s", input)
-
+	var ts uint64
+	ts = 70099
 	q1 := &pb.Query{
-		Attr:      "name",
-		ExpandAll: true,
-		UidList:   newList([]uint64{0x1, 2, 3, 4}),
-		ReadTs:    70086,
-	}
-	q2 := &pb.Query{
 		Attr: "name",
 		SrcFunc: &pb.SrcFunction{
 			Name: "has",
 		},
-		ReadTs: 70086,
+
+		ReadTs: ts,
 	}
-	doQuery(client, q1)
+	// has(name)
+	// Request => parser => subgraph => worker(grpc)  => executionResult => subgraph=> json
+
+	ret := doQuery(client, q1)
+
+	q2 := &pb.Query{
+		Attr:      "friend",
+		ExpandAll: true,
+		UidList:   ret.UidMatrix[0],
+		DoCount:   true,
+		ReadTs:    ts,
+	}
+	fmt.Println(ret)
 	doQuery(client, q2)
-
-	// c := pb.NewGreeterClient(conn)
-
-	// // Contact the server and print out its response.
-	// name := defaultName
-	// if len(os.Args) > 1 {
-	// 	name = os.Args[1]
-	// }
-	// ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	// defer cancel()
-	// r, err := c.SayHello(ctx, &pb.HelloRequest{Name: name})
-	// if err != nil {
-	// 	log.Fatalf("could not greet: %v", err)
-	// }
-	// log.Printf("Greeting: %s", r.Message)
 }
