@@ -1268,7 +1268,7 @@ func (sg *SubGraph) transformVars(doneVars map[string]varValue, path []*SubGraph
 	return nil
 }
 
-func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*SubGraph,
+func (sg *SubGraph) valueVarAggregation(ctx context.Context, doneVars map[string]varValue, path []*SubGraph,
 	parent *SubGraph) error {
 	if !sg.IsInternal() && !sg.IsGroupBy() && !sg.Params.IsEmpty {
 		return nil
@@ -1301,8 +1301,7 @@ func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*Su
 		if err != nil {
 			return err
 		}
-
-		err = evalMathTree(sg.MathExp)
+		err = evalMathTree(ctx, sg.MathExp, sg.SrcUIDs, sg.ReadTs)
 		if err != nil {
 			return err
 		}
@@ -1368,18 +1367,18 @@ func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*Su
 	return nil
 }
 
-func (sg *SubGraph) populatePostAggregation(doneVars map[string]varValue, path []*SubGraph,
+func (sg *SubGraph) populatePostAggregation(ctx context.Context, doneVars map[string]varValue, path []*SubGraph,
 	parent *SubGraph) error {
 	for idx := 0; idx < len(sg.Children); idx++ {
 		child := sg.Children[idx]
 		path = append(path, sg)
-		err := child.populatePostAggregation(doneVars, path, sg)
+		err := child.populatePostAggregation(ctx, doneVars, path, sg)
 		path = path[:len(path)-1]
 		if err != nil {
 			return err
 		}
 	}
-	return sg.valueVarAggregation(doneVars, path, parent)
+	return sg.valueVarAggregation(ctx, doneVars, path, parent)
 }
 
 // Filters might have updated the destuids. facetMatrix should also be updated.
@@ -2693,7 +2692,7 @@ func (req *QueryRequest) ProcessQuery(ctx context.Context) (err error) {
 			if err := sg.populateVarMap(req.vars, sgPath); err != nil {
 				return err
 			}
-			if err := sg.populatePostAggregation(req.vars, []*SubGraph{}, nil); err != nil {
+			if err := sg.populatePostAggregation(ctx, req.vars, []*SubGraph{}, nil); err != nil {
 				return err
 			}
 		}

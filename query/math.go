@@ -17,8 +17,10 @@
 package query
 
 import (
-	"fmt"
+	"context"
 
+	"github.com/dgraph-io/dgraph/ext"
+	"github.com/dgraph-io/dgraph/protos/pb"
 	"github.com/dgraph-io/dgraph/types"
 	"github.com/dgraph-io/dgraph/x"
 	"github.com/golang/glog"
@@ -30,6 +32,18 @@ type mathTree struct {
 	Const types.Val // If its a const value node.
 	Val   map[uint64]types.Val
 	Child []*mathTree
+}
+
+func mathTreeToParamTree(input []*mathTree) []ext.ParamTree {
+	output := []ext.ParamTree{}
+	for _, in := range input {
+		out := ext.ParamTree{
+			in.Var,
+			mathTreeToParamTree(in.Child),
+		}
+		output = append(output, out)
+	}
+	return output
 }
 
 // processBinary handles the binary operands like
@@ -212,21 +226,22 @@ func processTernary(mNode *mathTree) error {
 	return nil
 }
 
-func processUnLimited(mNode *mathTree) error {
-	destMap := make(map[uint64]types.Val)
-	srcMap := mNode.Child[0].Val
-	fmt.Println("unlimit:", mNode, srcMap)
-	for k := uint64(0x01); k < uint64(0x04); k++ {
-		destMap[k] = types.Val{
-			Value: int64(3 * k),
-			Tid:   types.IntID,
-		}
+func processUnLimited(param ext.ProcessFuncParam, mNode *mathTree) error {
+
+	fn := ext.PickProcessFunc(param.FuncName)
+	if fn == nil {
+		return x.Errorf("not find funcition %v", param.FuncName)
+	}
+	destMap, err := fn(param)
+	if err != nil {
+		return err
 	}
 	mNode.Val = destMap
 	return nil
 }
 
-func evalMathTree(mNode *mathTree) error {
+// pass the context
+func evalMathTree(ctx context.Context, mNode *mathTree, srcUids *pb.List, readTS uint64) error {
 	if mNode.Const.Value != nil {
 		return nil
 	}
@@ -240,7 +255,7 @@ func evalMathTree(mNode *mathTree) error {
 
 	for _, child := range mNode.Child {
 		// Process the child nodes first.
-		err := evalMathTree(child)
+		err := evalMathTree(ctx, child, srcUids, readTS)
 		if err != nil {
 			return err
 		}
@@ -279,8 +294,17 @@ func evalMathTree(mNode *mathTree) error {
 		return processTernary(mNode)
 	}
 
-	if isUnLimited(aggName) {
-		return processUnLimited(mNode)
+	if ext.HasProcessFunc(aggName) {
+		edges := []string{}
+		for _, child := range mNode.Child {
+			edges = append(edges, child.Var)
+		}
+		paramTree := mathTreeToParamTree(mNode.Child)
+		// mNode.Child
+		param := ext.ProcessFuncParam{
+			ctx, readTS, aggName, srcUids, edges, paramTree,
+		}
+		return processUnLimited(param, mNode)
 	}
 	return x.Errorf("Unhandled Math operator: %v", aggName)
 }

@@ -8,7 +8,8 @@ import (
 )
 
 type ParamTree struct {
-	Var string
+	Var   string
+	Child []ParamTree
 }
 type ProcessFuncParam struct {
 	Context     context.Context
