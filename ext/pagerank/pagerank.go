@@ -17,7 +17,10 @@ func PageRank(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 	ret := make(map[uint64]types.Val)
 	graph := pagerank.New()
 	for _, edgePred := range param.ParamLabels {
-		buildGraph(graph, edgePred, param)
+		err := buildGraph(graph, edgePred, param)
+		if err != nil {
+			return nil, err
+		}
 	}
 	probability_of_following_a_link := 0.85 // The bigger the number, less probability we have to teleport to some random link
 	tolerance := 0.0001                     // the smaller the number, the more exact the result will be but more CPU cycles will be needed
@@ -44,7 +47,7 @@ func buildGraph(graph pagerank.Interface, pred string, param ext.ProcessFuncPara
 	}
 	result, err := worker.ProcessTaskOverNetwork(param.Context, taskQuery)
 	if err != nil {
-		return x.Errorf("Error in NodeDegree { pred:%s ,msg: %v}", pred, err)
+		return x.Errorf("Error in PageRank { pred:%s ,msg: %v}", pred, err)
 	}
 	u := result.UidMatrix
 	for i := 0; i < len(u); i++ {
