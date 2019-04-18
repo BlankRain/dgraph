@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dgraph-io/dgraph/ext"
 	"github.com/dgraph-io/dgraph/lex"
 	"github.com/dgraph-io/dgraph/types"
 	"github.com/dgraph-io/dgraph/x"
@@ -75,9 +76,14 @@ func isTernary(f string) bool {
 }
 
 func isUnLimited(f string) bool {
-	return f == "nodedegree"
+	return ext.HasProcessFunc(f)
 }
-
+func pickMathOpPrecedence(op string) int {
+	if v, ok := mathOpPrecedence[op]; ok {
+		return v
+	}
+	return ext.PickExtMathOpPrecedence(op)
+}
 func isZero(f string, rval types.Val) bool {
 	if rval.Tid != types.FloatID {
 		return false
@@ -156,7 +162,7 @@ func isMathFunc(f string) bool {
 		f == "==" || f == "!=" ||
 		f == "min" || f == "max" || f == "sqrt" ||
 		f == "pow" || f == "logbase" || f == "floor" || f == "ceil" ||
-		f == "since" || f == "nodedegree"
+		f == "since" || ext.HasProcessFunc(f)
 }
 
 func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
@@ -186,12 +192,12 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 				(lastItem.Val == "(" || lastItem.Val == "," || isBinaryMath(lastItem.Val)) {
 				op = "u-" // This is a unary -
 			}
-			opPred := mathOpPrecedence[op]
+			opPred := pickMathOpPrecedence(op)
 			x.AssertTruef(opPred > 0, "Expected opPred > 0 for %v: %d", op, opPred)
 			// Evaluate the stack until we see an operator with strictly lower pred.
 			for !opStack.empty() {
 				topOp := opStack.peek()
-				if mathOpPrecedence[topOp.Fn] < opPred {
+				if pickMathOpPrecedence(topOp.Fn) < opPred {
 					break
 				}
 				err := evalMathStack(opStack, valueStack)
