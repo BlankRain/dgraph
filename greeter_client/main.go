@@ -50,6 +50,7 @@ func doQuery(client pb.WorkerClient, q *pb.Query) {
 	for i, v := range ret.ValueMatrix {
 		log.Printf("value :%d %v", i, v)
 	}
+	log.Printf("%v", ret)
 
 }
 func main() {
@@ -67,22 +68,23 @@ func main() {
 		newList([]uint64{2, 4, 5, 7, 15}),
 	}
 	log.Printf("%s", input)
-
+	rt := uint64(198010)
 	q1 := &pb.Query{
-		Attr:      "name",
-		ExpandAll: true,
-		UidList:   newList([]uint64{0x1, 2, 3, 4}),
-		ReadTs:    0,
+		Attr:    "friend",
+		Reverse: true,
+		DoCount: true,
+		UidList: newList([]uint64{0x1, 2, 3}),
+		ReadTs:  rt,
 	}
-	q2 := &pb.Query{
-		Attr: "name",
-		SrcFunc: &pb.SrcFunction{
-			Name: "has",
-		},
-		ReadTs: 0,
-	}
+	// q2 := &pb.Query{
+	// 	Attr: "name",
+	// 	SrcFunc: &pb.SrcFunction{
+	// 		Name: "has",
+	// 	},
+	// 	ReadTs: 0,
+	// }
 	doQuery(client, q1)
-	doQuery(client, q2)
+	// doQuery(client, q2)
 
 	// c := pb.NewGreeterClient(conn)
 
