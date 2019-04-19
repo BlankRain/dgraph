@@ -11,6 +11,10 @@ import (
 	"github.com/dgraph-io/dgraph/x"
 )
 
+func init() {
+	ext.RegistProcessFunction("nodedegree", NodeDegree, 106)
+}
+
 func NodeDegree(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 	destMap := make(map[uint64]int64)
 	// init
@@ -18,7 +22,7 @@ func NodeDegree(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 		destMap[uid] = 0
 	}
 	for _, edgePred := range param.ParamLabels {
-		err := doComputeNodeOutDegree(param.Context, param.SrcUids, edgePred, false, param.ReadTs, destMap)
+		err := doComputeNodeDegree(param.Context, param.SrcUids, edgePred, false, param.ReadTs, destMap)
 		if err != nil {
 			log.Printf("error when compute node outdegree %v", err)
 			return nil, err
@@ -30,13 +34,13 @@ func NodeDegree(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 		log.Printf("error when compute node outdegree %v", err)
 		return nil, err
 	}
-	// find reverse
+	// find reverse and compute indegree
 	for _, edgePred := range param.ParamLabels {
 		for _, sch := range schs {
 			if edgePred == sch.Predicate && sch.Reverse {
-				err := doComputeNodeOutDegree(param.Context, param.SrcUids, edgePred, true, param.ReadTs, destMap)
+				err := doComputeNodeDegree(param.Context, param.SrcUids, edgePred, true, param.ReadTs, destMap)
 				if err != nil {
-					log.Printf("error when compute node outdegree %v", err)
+					log.Printf("error when compute node indegree %v", err)
 					return nil, err
 				}
 			}
@@ -56,7 +60,7 @@ func NodeDegree(param ext.ProcessFuncParam) (map[uint64]types.Val, error) {
 func newList(data []uint64) *pb.List {
 	return &pb.List{Uids: data}
 }
-func doComputeNodeOutDegree(ctx context.Context, uidList *pb.List,
+func doComputeNodeDegree(ctx context.Context, uidList *pb.List,
 	pred string, isReverse bool, readTS uint64, destMap map[uint64]int64) error {
 	//
 	taskQuery := &pb.Query{
@@ -78,8 +82,4 @@ func doComputeNodeOutDegree(ctx context.Context, uidList *pb.List,
 		}
 	}
 	return nil
-}
-
-func init() {
-	ext.RegistProcessFunction("nodedegree", NodeDegree, 106)
 }
