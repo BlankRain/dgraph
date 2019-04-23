@@ -166,7 +166,13 @@ func detectPendingTxns(attr string) error {
 func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr error) {
 	span := otrace.FromContext(ctx)
 
-	if proposal.Mutations.DropAll {
+	if proposal.Mutations.DropOp == pb.Mutations_DATA {
+		// Ensures nothing get written to disk due to commit proposals.
+		posting.Oracle().ResetTxns()
+		return posting.DeleteData()
+	}
+
+	if proposal.Mutations.DropOp == pb.Mutations_ALL {
 		// Ensures nothing get written to disk due to commit proposals.
 		posting.Oracle().ResetTxns()
 		schema.State().DeleteAll()
@@ -259,11 +265,7 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 
 	for attr, storageType := range schemaMap {
 		if _, err := schema.State().TypeOf(attr); err != nil {
-			// Schema doesn't exist
-			// Since committed entries are serialized, updateSchemaIfMissing is not
-			// needed, In future if schema needs to be changed, it would flow through
-			// raft so there won't be race conditions between read and update schema
-			updateSchemaType(attr, storageType, proposal.Index)
+			createSchema(attr, storageType)
 		}
 	}
 
@@ -660,7 +662,6 @@ func (n *node) Run() {
 		close(done)
 	}()
 
-	traceOpt := otrace.WithSampler(otrace.ProbabilitySampler(0.01))
 	var snapshotLoops uint64
 	for {
 		select {
@@ -700,13 +701,9 @@ func (n *node) Run() {
 			n.Raft().Tick()
 
 		case rd := <-n.Raft().Ready():
-			var start time.Time
-			var span *otrace.Span
-			if len(rd.Entries) > 0 || !raft.IsEmptySnap(rd.Snapshot) {
-				// Optionally, trace this run.
-				_, span = otrace.StartSpan(n.ctx, "Alpha.RunLoop", traceOpt)
-				start = time.Now()
-			}
+			start := time.Now()
+			_, span := otrace.StartSpan(n.ctx, "Alpha.RunLoop",
+				otrace.WithSampler(otrace.ProbabilitySampler(0.001)))
 
 			if rd.SoftState != nil {
 				groups().triggerMembershipSync()
@@ -771,6 +768,7 @@ func (n *node) Run() {
 
 			// Store the hardstate and entries. Note that these are not CommittedEntries.
 			n.SaveToStorage(rd.HardState, rd.Entries, rd.Snapshot)
+			diskDur := time.Since(start)
 			if span != nil {
 				span.Annotatef(nil, "Saved %d entries. Snapshot, HardState empty? (%v, %v)",
 					len(rd.Entries),
@@ -842,11 +840,16 @@ func (n *node) Run() {
 			if span != nil {
 				span.Annotate(nil, "Advanced Raft. Done.")
 				span.End()
-			}
-			if !start.IsZero() {
 				ostats.RecordWithTags(context.Background(),
 					[]tag.Mutator{tag.Upsert(x.KeyMethod, "alpha.RunLoop")},
 					x.LatencyMs.M(x.SinceMs(start)))
+			}
+			if time.Since(start) > 100*time.Millisecond {
+				glog.Warningf(
+					"Raft.Ready took too long to process: %v. Most likely due to slow disk: %v."+
+						" Num entries: %d. MustSync: %v",
+					time.Since(start).Round(time.Millisecond), diskDur.Round(time.Millisecond),
+					len(rd.Entries), rd.MustSync)
 			}
 		}
 	}
@@ -901,9 +904,16 @@ func (n *node) rollupLists(readTs uint64) error {
 			return nil, err
 		}
 		atomic.AddUint64(&numKeys, 1)
-		kv, err := l.MarshalToKv()
-		addTo(key, int64(kv.Size()))
-		return listWrap(kv), err
+		kvs, err := l.Rollup()
+
+		// If there are multiple keys, the posting list was split into multiple
+		// parts. The key of the first part is the right key to use for tablet
+		// size calculations.
+		for _, kv := range kvs {
+			addTo(kvs[0].Key, int64(kv.Size()))
+		}
+
+		return &bpb.KVList{Kv: kvs}, err
 	}
 	stream.Send = func(list *bpb.KVList) error {
 		return writer.Send(&pb.KVS{Kv: list.Kv})

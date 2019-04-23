@@ -41,24 +41,33 @@ func WriteFileSync(filename string, data []byte, perm os.FileMode) error {
 	return f.Close()
 }
 
-// FindFilesFunc walks the directory 'dir' and collects all file names matched by
-// func f. It will skip over directories.
-// Returns empty string slice if nothing found, otherwise returns all matched file names.
-func FindFilesFunc(dir string, f func(string) bool) []string {
-	var files []string
+// WalkPathFunc walks the directory 'dir' and collects all path names matched by
+// func f. If the path is a directory, it will set the bool argument to true.
+// Returns empty string slice if nothing found, otherwise returns all matched path names.
+func WalkPathFunc(dir string, f func(string, bool) bool) []string {
+	var list []string
 	err := filepath.Walk(dir, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !fi.IsDir() && f(path) {
-			files = append(files, path)
+		if f(path, fi.IsDir()) {
+			list = append(list, path)
 		}
 		return nil
 	})
 	if err != nil {
 		glog.Errorf("Error while scanning %q: %s", dir, err)
 	}
-	return files
+	return list
+}
+
+// FindFilesFunc walks the directory 'dir' and collects all file names matched by
+// func f. It will skip over directories.
+// Returns empty string slice if nothing found, otherwise returns all matched file names.
+func FindFilesFunc(dir string, f func(string) bool) []string {
+	return WalkPathFunc(dir, func(path string, isdir bool) bool {
+		return !isdir && f(path)
+	})
 }
 
 // FindDataFiles returns a list of data files as a string array. If str is a comma-separated list
@@ -70,7 +79,10 @@ func FindDataFiles(str string, ext []string) []string {
 	}
 
 	list := strings.Split(str, ",")
-	if len(list) == 1 {
+	if len(list) == 1 && list[0] != "-" {
+		// make sure the file or directory exists,
+		// and recursively search for files if it's a directory
+
 		fi, err := os.Stat(str)
 		if os.IsNotExist(err) {
 			glog.Errorf("File or directory does not exist: %s", str)

@@ -268,6 +268,19 @@ Deleting the value of a non-list predicate (i.e a 1-to-1 relation) can be done i
 1. Using the star notation mentioned in the last section.
 1. Setting the object to a specific value. If the value passed is not the current value, the mutation will succeed but will have no effect. If the value passed is the current value, the mutation will succeed and will delete the triple.
 
+For language-tagged values, the following special syntax is supported:
+
+```
+{
+	delete {
+		<0x12345> <name@es> * .
+	}
+}
+```
+
+In this example, the value of name tagged with language tag `es` will be deleted.
+Other tagged values are left untouched.
+
 ## Mutations using cURL
 
 Mutations can be done over HTTP by making a `POST` request to an Alpha's `/mutate` endpoint. On the command line this can be done with curl. To commit the mutation, pass the HTTP header `X-DgraphCommitNow: true`.
@@ -351,6 +364,31 @@ to the key `blank-0`. You could specify your own key like
 
 In this case, the assigned uids map would have a key called `diggy` with the value being the uid
 assigned to it.
+
+### Language support
+
+An important difference between RDF and JSON mutations is in regards to specifying a string value's
+language. In JSON, the language tag is appended to the edge _name_, not the value like in RDF.
+
+For example, the JSON mutation
+```json
+{
+  "food": "taco",
+  "rating@en": "tastes good",
+  "rating@es": "sabe bien",
+  "rating@fr": "c'est bon",
+  "rating@it": "è buono"
+}
+```
+
+is equivalent to the following RDF:
+```
+_:blank-0 <food> "taco" .
+_:blank-0 <rating> "tastes good"@en .
+_:blank-0 <rating> "sabe bien"@es .
+_:blank-0 <rating> "c'est bon"@fr .
+_:blank-0 <rating> "è buono"@it .
+```
 
 ### Referencing existing nodes
 

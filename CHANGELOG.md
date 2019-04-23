@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project will adhere to [Semantic Versioning](http://semver.org/spec/v2.0.0.html) starting v1.0.0.
 
+## [1.0.14] - 2019-04-12
+[1.0.14]: https://github.com/dgraph-io/dgraph/compare/v1.0.13...v1.0.14
+
+### Fixed
+
+- Fix bugs related to best-effort queries. ([#3125][])
+- Stream Raft Messages and Fix Check Quorum. ([#3138][])
+- Fix lin reads timeouts and AssignUid recursion in Zero. ([#3203][])
+- Fix panic when running `@groupby(uid)` which is not allowed and other logic fixes. ([#3232][])
+- Fix a StartTs Mismatch bug which happens when running multiple best effort queries using the same txn. Reuse the same timestamp instead of allocating a new one. ([#3187][]) ([#3246][])
+- Shutdown extra connections. ([#3280][])
+- Fix bug for queries with `@recurse` and `expand(_all_)`. ([#3179][])
+- Fix assorted cases of goroutine leaks. ([#3074][])
+- Increment tool: Fix best-effort flag name so best-effort queries run as intended from the tool. ([d386fa5][])
+
+[#3125]: https://github.com/dgraph-io/dgraph/pull/3125
+[#3138]: https://github.com/dgraph-io/dgraph/pull/3138
+[#3203]: https://github.com/dgraph-io/dgraph/pull/3203
+[#3232]: https://github.com/dgraph-io/dgraph/pull/3232
+[#3187]: https://github.com/dgraph-io/dgraph/pull/3187
+[#3246]: https://github.com/dgraph-io/dgraph/pull/3246
+[#3280]: https://github.com/dgraph-io/dgraph/pull/3280
+[#3179]: https://github.com/dgraph-io/dgraph/pull/3179
+[#3074]: https://github.com/dgraph-io/dgraph/pull/3074
+[d386fa5]: https://github.com/dgraph-io/dgraph/commit/d386fa5
+
+### Added
+
+- Add timeout option while running queries over HTTP. Setting the `timeout` query parameter `/query?timeout=60s` will timeout queries after 1 minute. ([#3238][])
+- Add `badger` tool to release binaries and Docker image.
+
+[#3238]: https://github.com/dgraph-io/dgraph/pull/3238
+
 ## [1.0.13] - 2019-03-10
 [1.0.13]: https://github.com/dgraph-io/dgraph/compare/v1.0.12...v1.0.13
 
@@ -301,7 +334,7 @@ are now exposed via flags named with `--badger.` prefix.
 ### Fixed
 
 * Fix bug where predicate with string type sometimes appeared as `_:uidffffffffffffffff` in exports.
-* Validate facet value should be according to the facet type supplied when mutating using NQuads ([#2074](https://github.com/dgraph-io/dgraph/issues/2074)).
+* Validate facet value should be according to the facet type supplied when mutating using N-Quads ([#2074](https://github.com/dgraph-io/dgraph/issues/2074)).
 * Use `time.Equal` function for comparing predicates with `datetime`([#2219](https://github.com/dgraph-io/dgraph/issues/2219)).
 * Skip `BitEmptyPosting` for `has` queries.
 * Return error from query if we don't serve the group for the attribute instead of crashing ([#2227](https://github.com/dgraph-io/dgraph/issues/2227)).
@@ -575,7 +608,7 @@ Examples for [Go client](https://godoc.org/github.com/dgraph-io/dgraph/client#ex
 #### Mutations
 
 * Mutations can only be done via `Mutate` Grpc endpoint or via [`/mutate` HTTP handler](https://docs.dgraph.io/clients/#transactions).
-* `Mutate` Grpc endpoint can be used to set/ delete JSON, or set/ delete a list of NQuads and set/ delete raw RDF strings.
+* `Mutate` Grpc endpoint can be used to set/ delete JSON, or set/ delete a list of N-Quads and set/ delete raw RDF strings.
 * Mutation blocks don't require the mutation keyword anymore. Here is an example of the new syntax.
 ```
 {

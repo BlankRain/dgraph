@@ -28,18 +28,19 @@ import (
 	"github.com/dgraph-io/dgo"
 	"github.com/dgraph-io/dgo/protos/api"
 	"github.com/dgraph-io/dgraph/x"
+	"github.com/dgraph-io/dgraph/z"
 	"google.golang.org/grpc"
 )
 
 func assignUids(num uint64) {
-	_, err := http.Get(fmt.Sprintf("http://localhost:6080/assign?what=uids&num=%d", num))
+	_, err := http.Get(fmt.Sprintf("http://"+z.SockAddrZeroHttp+"/assign?what=uids&num=%d", num))
 	if err != nil {
 		panic(fmt.Sprintf("Could not assign uids. Got error %v", err.Error()))
 	}
 }
 
 func getNewClient() *dgo.Dgraph {
-	conn, err := grpc.Dial("localhost:9180", grpc.WithInsecure())
+	conn, err := grpc.Dial(z.SockAddr, grpc.WithInsecure())
 	x.Check(err)
 	return dgo.NewDgraphClient(api.NewDgraphClient(conn))
 }
@@ -207,6 +208,13 @@ type Animal {
 	name: string
 }
 
+type CarModel {
+	make: string
+	model: string
+	year: int
+	previous_model: CarModel
+}
+
 name                           : string @index(term, exact, trigram) @count @lang .
 alias                          : string @index(exact, term, fulltext) .
 dob                            : dateTime @index(year) .
@@ -237,6 +245,13 @@ room                           : string @index(term) .
 office.room                    : [uid] .
 best_friend                    : uid @reverse .
 pet                            : [uid] .
+node                           : [uid] .
+model                          : string @index(term) .
+make                           : string @index(term) .
+year                           : int .
+previous_model                 : uid @reverse .
+created_at                     : datetime @index(hour) .
+updated_at                     : datetime @index(year) .
 `
 
 func populateCluster() {
@@ -274,25 +289,25 @@ func populateCluster() {
 		<2301> <name> "Alice\"" .
 		<2333> <name> "Helmut" .
 		<3500> <name> "" .
-		<3500> <name@ko> "상현" .
+		<3500> <name> "상현"@ko .
 		<3501> <name> "Alex" .
-		<3501> <name@en> "Alex" .
+		<3501> <name> "Alex"@en .
 		<3502> <name> "" .
-		<3502> <name@en> "Amit" .
-		<3502> <name@hi> "अमित" .
-		<3503> <name@en> "Andrew" .
-		<3503> <name@hi> "" .
+		<3502> <name> "Amit"@en .
+		<3502> <name> "अमित"@hi .
+		<3503> <name> "Andrew"@en .
+		<3503> <name> ""@hi .
 		<4097> <name> "Badger" .
-		<4097> <name@en> "European badger" .
-		<4097> <name@xx> "European badger barger European" .
-		<4097> <name@pl> "Borsuk europejski" .
-		<4097> <name@de> "Europäischer Dachs" .
-		<4097> <name@ru> "Барсук" .
-		<4097> <name@fr> "Blaireau européen" .
-		<4098> <name@en> "Honey badger" .
-		<4099> <name@en> "Honey bee" .
-		<4100> <name@en> "Artem Tkachenko" .
-		<4100> <name@ru> "Артём Ткаченко" .
+		<4097> <name> "European badger"@en .
+		<4097> <name> "European badger barger European"@xx .
+		<4097> <name> "Borsuk europejski"@pl .
+		<4097> <name> "Europäischer Dachs"@de .
+		<4097> <name> "Барсук"@ru .
+		<4097> <name> "Blaireau européen"@fr .
+		<4098> <name> "Honey badger"@en .
+		<4099> <name> "Honey bee"@en .
+		<4100> <name> "Artem Tkachenko"@en .
+		<4100> <name> "Артём Ткаченко"@ru .
 		<5000> <name> "School A" .
 		<5001> <name> "School B" .
 		<5101> <name> "Googleplex" .
@@ -311,10 +326,12 @@ func populateCluster() {
 		<10005> <name> "Bob" .
 		<10006> <name> "Colin" .
 		<10007> <name> "Elizabeth" .
-		<11000> <name@en> "Baz Luhrmann" .
-		<11001> <name@en> "Strictly Ballroom" .
-		<11002> <name@en> "Puccini: La boheme (Sydney Opera)" .
-		<11003> <name@en> "No. 5 the film" .
+
+		<11000> <name> "Baz Luhrmann"@en .
+		<11001> <name> "Strictly Ballroom"@en .
+		<11002> <name> "Puccini: La boheme (Sydney Opera)"@en .
+		<11003> <name> "No. 5 the film"@en .
+		<11100> <name> "expand" .
 
 		<1> <full_name> "Michonne's large name for hashing" .
 
@@ -328,9 +345,9 @@ func populateCluster() {
 		<31> <friend> <24> .
 		<23> <friend> <1> .
 
-		<2> <best_friend> <64> .
-		<3> <best_friend> <64> .
-		<4> <best_friend> <64> .
+		<2> <best_friend> <64> (since=2019-03-28T14:41:57+30:00) .
+		<3> <best_friend> <64> (since=2018-03-24T14:41:57+05:30) .
+		<4> <best_friend> <64> (since=2019-03-27) .
 
 		<1> <age> "38" .
 		<23> <age> "15" .
@@ -444,21 +461,21 @@ func populateCluster() {
 		<5010> <nick_name> "Two Terms" .
 
 		<4097> <lossy> "Badger" .
-		<4097> <lossy@en> "European badger" .
-		<4097> <lossy@xx> "European badger barger European" .
-		<4097> <lossy@pl> "Borsuk europejski" .
-		<4097> <lossy@de> "Europäischer Dachs" .
-		<4097> <lossy@ru> "Барсук" .
-		<4097> <lossy@fr> "Blaireau européen" .
-		<4098> <lossy@en> "Honey badger" .
+		<4097> <lossy> "European badger"@en .
+		<4097> <lossy> "European badger barger European"@xx .
+		<4097> <lossy> "Borsuk europejski"@pl .
+		<4097> <lossy> "Europäischer Dachs"@de .
+		<4097> <lossy> "Барсук"@ru .
+		<4097> <lossy> "Blaireau européen"@fr .
+		<4098> <lossy> "Honey badger"@en .
 
 		<23> <film.film.initial_release_date> "1900-01-02" .
 		<24> <film.film.initial_release_date> "1909-05-05" .
 		<25> <film.film.initial_release_date> "1929-01-10" .
 		<31> <film.film.initial_release_date> "1801-01-15" .
 
-		<0x10000> <royal_title@en> "Her Majesty Elizabeth the Second, by the Grace of God of the United Kingdom of Great Britain and Northern Ireland and of Her other Realms and Territories Queen, Head of the Commonwealth, Defender of the Faith" .
-		<0x10000> <royal_title@fr> "Sa Majesté Elizabeth Deux, par la grâce de Dieu Reine du Royaume-Uni, du Canada et de ses autres royaumes et territoires, Chef du Commonwealth, Défenseur de la Foi" .
+		<0x10000> <royal_title> "Her Majesty Elizabeth the Second, by the Grace of God of the United Kingdom of Great Britain and Northern Ireland and of Her other Realms and Territories Queen, Head of the Commonwealth, Defender of the Faith"@en .
+		<0x10000> <royal_title> "Sa Majesté Elizabeth Deux, par la grâce de Dieu Reine du Royaume-Uni, du Canada et de ses autres royaumes et territoires, Chef du Commonwealth, Défenseur de la Foi"@fr .
 
 		<32> <school> <33> .
 		<33> <district> <34> .
@@ -474,11 +491,13 @@ func populateCluster() {
 		<23> <shadow_deep> "4" .
 		<24> <shadow_deep> "14" .
 
-		<2> <type> "Person" .
-		<3> <type> "Person" .
-		<4> <type> "Person" .
-		<5> <type> "Animal" .
-		<6> <type> "Animal" .
+		<2> <dgraph.type> "Person" .
+		<3> <dgraph.type> "Person" .
+		<4> <dgraph.type> "Person" .
+		<5> <dgraph.type> "Animal" .
+		<5> <dgraph.type> "Pet" .
+		<6> <dgraph.type> "Animal" .
+		<6> <dgraph.type> "Pet" .
 
 		<2> <pet> <5> .
 		<3> <pet> <6> .
@@ -490,6 +509,19 @@ func populateCluster() {
 		<11000> <director.film> <11001> .
 		<11000> <director.film> <11002> .
 		<11000> <director.film> <11003> .
+
+		<11100> <node> <11100> .
+
+		<200> <make> "Ford" .
+		<200> <model> "Focus" .
+		<200> <year> "2008" .
+		<200> <dgraph.type> "CarModel" .
+
+		<201> <make> "Ford" .
+		<201> <model> "Focus" .
+		<201> <year> "2009" .
+		<201> <dgraph.type> "CarModel" .
+		<201> <previous_model> <200> .
 	`)
 
 	addGeoPointToCluster(1, "loc", []float64{1.1, 2.0})
@@ -540,4 +572,23 @@ func populateCluster() {
 		addTriplesToCluster(triples)
 		nextId++
 	}
+
+	// Add data for datetime tests
+	addTriplesToCluster(`
+		<301> <created_at> "2019-03-28T14:41:57+30:00" (modified_at=2019-05-28T14:41:57+30:00) .
+		<302> <created_at> "2019-03-28T13:41:57+29:00" (modified_at=2019-03-28T14:41:57+30:00) .
+		<303> <created_at> "2019-03-27T14:41:57+06:00" (modified_at=2019-03-29) .
+		<304> <created_at> "2019-03-28T15:41:57+30:00" (modified_at=2019-03-27T14:41:57+06:00) .
+		<305> <created_at> "2019-03-28T13:41:57+30:00" (modified_at=2019-03-28) .
+		<306> <created_at> "2019-03-24T14:41:57+05:30" (modified_at=2019-03-28T13:41:57+30:00) .
+		<307> <created_at> "2019-05-28T14:41:57+30:00" .
+
+		<301> <updated_at> "2019-03-28T14:41:57+30:00" (modified_at=2019-05-28) .
+		<302> <updated_at> "2019-03-28T13:41:57+29:00" (modified_at=2019-03-28T14:41:57+30:00) .
+		<303> <updated_at> "2019-03-27T14:41:57+06:00" (modified_at=2019-03-28T13:41:57+29:00) .
+		<304> <updated_at> "2019-03-27T09:41:57" .
+		<305> <updated_at> "2019-03-28T13:41:57+30:00" (modified_at=2019-03-28T15:41:57+30:00) .
+		<306> <updated_at> "2019-03-24T14:41:57+05:30" (modified_at=2019-03-28T13:41:57+30:00) .
+		<307> <updated_at> "2019-05-28" (modified_at=2019-03-24T14:41:57+05:30) .
+	`)
 }
