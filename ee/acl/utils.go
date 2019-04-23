@@ -70,6 +70,9 @@ type User struct {
 }
 
 func (u *User) GetUid() string {
+	if u == nil {
+		return ""
+	}
 	return u.Uid
 }
 
@@ -109,6 +112,9 @@ type Group struct {
 }
 
 func (g *Group) GetUid() string {
+	if g == nil {
+		return ""
+	}
 	return g.Uid
 }
 
@@ -180,18 +186,18 @@ type CloseFunc func()
 
 func getDgraphClient(conf *viper.Viper) (*dgo.Dgraph, CloseFunc) {
 	opt = options{
-		dgraph: conf.GetString("dgraph"),
+		alpha: conf.GetString("alpha"),
 	}
-	fmt.Printf("\nRunning transaction with dgraph endpoint: %v\n", opt.dgraph)
+	fmt.Printf("\nRunning transaction with dgraph endpoint: %v\n", opt.alpha)
 
-	if len(opt.dgraph) == 0 {
-		glog.Fatalf("The --dgraph option must be set in order to connect to dgraph")
+	if len(opt.alpha) == 0 {
+		glog.Fatalf("The --alpha option must be set in order to connect to dgraph")
 	}
 
-	x.LoadTLSConfig(&tlsConf, CmdAcl.Conf, x.TlsClientCert, x.TlsClientKey)
-	tlsConf.ServerName = CmdAcl.Conf.GetString("tls_server_name")
+	tlsCfg, err := x.LoadClientTLSConfig(conf)
+	x.Checkf(err, "While loading TLS configuration")
 
-	conn, err := x.SetupConnection(opt.dgraph, &tlsConf, false)
+	conn, err := x.SetupConnection(opt.alpha, tlsCfg, false)
 	x.Checkf(err, "While trying to setup connection to Dgraph alpha.")
 
 	dc := api.NewDgraphClient(conn)
