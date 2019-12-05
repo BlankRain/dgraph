@@ -27,15 +27,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
-	"github.com/dgraph-io/dgo/x"
-	"github.com/dgraph-io/dgo/y"
-	"github.com/dgraph-io/dgraph/z"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"github.com/dgraph-io/dgraph/testutil"
+	"github.com/dgraph-io/dgraph/x"
 )
 
 var (
-	alpha   = flag.String("alpha", "localhost:9080", "dgraph alpha address")
+	alpha   = flag.String("alpha", "localhost:9180", "dgraph alpha address")
 	concurr = flag.Int("c", 3, "number of concurrent upserts per account")
 )
 
@@ -70,7 +69,8 @@ func init() {
 
 func main() {
 	flag.Parse()
-	c := z.DgraphClientWithGroot(":9180")
+	c, err := testutil.DgraphClientWithGroot(*alpha)
+	x.Check(err)
 	setup(c)
 	fmt.Println("Doing upserts")
 	doUpserts(c)
@@ -124,7 +124,7 @@ func upsert(c *dgo.Dgraph, acc account) {
 		if err == nil {
 			atomic.AddUint64(&successCount, 1)
 			return
-		} else if err == y.ErrAborted {
+		} else if err == dgo.ErrAborted {
 			// pass
 		} else {
 			fmt.Printf("ERROR: %v", err)
@@ -137,7 +137,7 @@ func tryUpsert(c *dgo.Dgraph, acc account) error {
 	ctx := context.Background()
 
 	txn := c.NewTxn()
-	defer txn.Discard(ctx)
+	defer func() { _ = txn.Discard(ctx) }()
 	q := fmt.Sprintf(`
 		{
 			get(func: eq(first, %q)) @filter(eq(last, %q) AND eq(age, %d)) {

@@ -21,16 +21,19 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
-	"github.com/dgraph-io/dgraph/z"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"github.com/dgraph-io/dgraph/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 func TestLivePassword(t *testing.T) {
 	wrap := func(fn func(*testing.T, *dgo.Dgraph)) func(*testing.T) {
 		return func(t *testing.T) {
-			dg := z.DgraphClientWithGroot(z.SockAddr)
+			dg, err := testutil.DgraphClientWithGroot(testutil.SockAddr)
+			if err != nil {
+				t.Fatalf("Error while getting a dgraph client: %v", err)
+			}
 			fn(t, dg)
 			require.NoError(t, dg.Alter(
 				context.Background(), &api.Operation{DropAll: true}))

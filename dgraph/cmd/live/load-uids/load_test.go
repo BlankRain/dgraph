@@ -19,20 +19,22 @@ package main
 import (
 	"context"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
 	"runtime"
 	"testing"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/dgraph/testutil"
 	"github.com/dgraph-io/dgraph/x"
-	"github.com/dgraph-io/dgraph/z"
 )
 
-var alphaService = z.SockAddr
+var alphaService = testutil.SockAddr
+var zeroService = testutil.SockAddrZero
 
 var (
 	testDataDir string
@@ -47,7 +49,7 @@ func checkDifferentUid(t *testing.T, wantMap, gotMap map[string]interface{}) {
 
 	gotMap["q"].([]interface{})[0].(map[string]interface{})["uid"] = -1
 	wantMap["q"].([]interface{})[0].(map[string]interface{})["uid"] = -1
-	z.CompareJSONMaps(t, wantMap, gotMap)
+	testutil.CompareJSONMaps(t, wantMap, gotMap)
 }
 
 func checkLoadedData(t *testing.T, newUids bool) {
@@ -63,8 +65,8 @@ func checkLoadedData(t *testing.T, newUids bool) {
 	`)
 	require.NoError(t, err)
 
-	gotMap := z.UnmarshalJSON(t, string(resp.GetJson()))
-	wantMap := z.UnmarshalJSON(t, `
+	gotMap := testutil.UnmarshalJSON(t, string(resp.GetJson()))
+	wantMap := testutil.UnmarshalJSON(t, `
 		{
 		    "q": [
 					{
@@ -79,7 +81,7 @@ func checkLoadedData(t *testing.T, newUids bool) {
 	if newUids {
 		checkDifferentUid(t, wantMap, gotMap)
 	} else {
-		z.CompareJSONMaps(t, wantMap, gotMap)
+		testutil.CompareJSONMaps(t, wantMap, gotMap)
 	}
 
 	resp, err = dg.NewTxn().Query(context.Background(), `
@@ -94,8 +96,8 @@ func checkLoadedData(t *testing.T, newUids bool) {
 	`)
 	require.NoError(t, err)
 
-	gotMap = z.UnmarshalJSON(t, string(resp.GetJson()))
-	wantMap = z.UnmarshalJSON(t, `
+	gotMap = testutil.UnmarshalJSON(t, string(resp.GetJson()))
+	wantMap = testutil.UnmarshalJSON(t, `
 		{
 		    "q": [
 				{
@@ -110,61 +112,61 @@ func checkLoadedData(t *testing.T, newUids bool) {
 	if newUids {
 		checkDifferentUid(t, wantMap, gotMap)
 	} else {
-		z.CompareJSONMaps(t, wantMap, gotMap)
+		testutil.CompareJSONMaps(t, wantMap, gotMap)
 	}
 }
 
 func TestLiveLoadJsonUidKeep(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
 
 	checkLoadedData(t, false)
 }
 
 func TestLiveLoadJsonUidDiscard(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live", "--new_uids",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
 
 	checkLoadedData(t, true)
 }
 
 func TestLiveLoadRdfUidKeep(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.rdf",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
 
 	checkLoadedData(t, false)
 }
 
 func TestLiveLoadRdfUidDiscard(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live", "--new_uids",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.rdf",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
 
 	checkLoadedData(t, true)
@@ -174,7 +176,11 @@ func TestMain(m *testing.M) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	testDataDir = path.Dir(thisFile)
 
-	dg = z.DgraphClientWithGroot(z.SockAddr)
+	var err error
+	dg, err = testutil.DgraphClientWithGroot(testutil.SockAddr)
+	if err != nil {
+		log.Fatalf("Error while getting a dgraph client: %v", err)
+	}
 	x.Check(dg.Alter(
 		context.Background(), &api.Operation{DropAll: true}))
 

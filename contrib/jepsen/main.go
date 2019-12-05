@@ -15,22 +15,22 @@
  */
 
 // Runs Dgraph Jepsen tests with a local Dgraph binary.
-// Set JEPSEN_ROOT environment variable before running.
+// Set the --jepsen-root flag to the path of the Jepsen repo directory.
 //
 // Example usage:
 //
 // Runs all test and nemesis combinations (36 total)
-//     ./jepsen
+//     ./jepsen --jepsen-root $JEPSEN_ROOT --test-all
 //
 // Runs bank test with partition-ring nemesis for 10 minutes
-//     ./jepsen --jepsen.workload bank --jepsen.nemesis partition-ring
+//     ./jepsen --jepsen-root $JEPSEN_ROOT --workload bank --nemesis partition-ring
 
 package main
 
 import (
 	"bytes"
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -39,9 +39,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dgraph-io/dgraph/contrib/jepsen/browser"
+	"github.com/spf13/pflag"
 )
 
-type JepsenTest struct {
+type jepsenTest struct {
 	workload          string
 	nemesis           string
 	timeLimit         int
@@ -54,14 +57,13 @@ type JepsenTest struct {
 }
 
 const (
-	TestPass = iota
-	TestFail
-	TestIncomplete
+	testPass = iota
+	testFail
+	testIncomplete
 )
 
 var (
-	// Comma-separated arguments
-	defaultWorkloads = []string{
+	availableWorkloads = []string{
 		"bank",
 		"delete",
 		"long-fork",
@@ -72,9 +74,18 @@ var (
 		"uid-set",
 		"sequential",
 	}
-	// Space-separated arguments
-	defaultNemeses = []string{
+	availableNemeses = []string{
 		"none",
+		"kill-alpha",
+		"kill-zero",
+		"partition-ring",
+		"move-tablet",
+	}
+
+	testAllWorkloads = availableWorkloads
+	testAllNemeses   = []string{
+		"none",
+		// the kill nemeses run together
 		"kill-alpha,kill-zero",
 		"partition-ring",
 		"move-tablet",
@@ -85,42 +96,57 @@ var (
 	ctxb = context.Background()
 
 	// Jepsen test flags
-	timeLimit   = flag.Int("jepsen.time-limit", 600, "Time limit per Jepsen test in seconds.")
-	nodes       = flag.String("jepsen.nodes", "n1,n2,n3,n4,n5", "Nodes to run on.")
-	concurrency = flag.String("jepsen.concurrency", "6n", "Number of concurrent workers.")
-	workload    = flag.String("jepsen.workload", strings.Join(defaultWorkloads, ","),
-		"Test workload to run.")
-	nemesis = flag.String("jepsen.nemesis", strings.Join(defaultNemeses, " "),
-		"A space-separated, comma-separated list of nemesis types.")
-	localBinary = flag.String("jepsen.local-binary", "/gobin/dgraph",
-		"Path to Dgraph binary within the Jepsen control node.")
-	rebalanceInterval = flag.String("jepsen.rebalance-interval", "10h",
+	workload = pflag.StringP("workload", "w", "",
+		"Test workload to run. Specify a space-separated list of workloads. Available workloads: "+
+			fmt.Sprintf("%q", availableWorkloads))
+	nemesis = pflag.StringP("nemesis", "n", "",
+		"A space-separated, comma-separated list of nemesis types. "+
+			"Combinations of nemeses can be specified by combining them with commas, "+
+			"e.g., kill-alpha,kill-zero. Available nemeses: "+
+			fmt.Sprintf("%q", availableNemeses))
+	timeLimit = pflag.IntP("time-limit", "l", 600,
+		"Time limit per Jepsen test in seconds.")
+	concurrency = pflag.String("concurrency", "6n",
+		"Number of concurrent workers per test. \"6n\" means 6 workers per node.")
+	rebalanceInterval = pflag.String("rebalance-interval", "10h",
 		"Interval of Dgraph's tablet rebalancing.")
-	skew   = flag.String("jepsen.skew", "", "Skew clock amount. (tiny, small, big, huge)")
-	jaeger = flag.String("jepsen.dgraph-jaeger-collector", "http://jaeger:14268",
-		"Run with Jaeger collector. Set to empty string to disable.")
-	testCount = flag.Int("jepsen.test-count", 1, "Test count per Jepsen test.")
+	localBinary = pflag.StringP("local-binary", "b", "/gobin/dgraph",
+		"Path to Dgraph binary within the Jepsen control node.")
+	nodes     = pflag.String("nodes", "n1,n2,n3,n4,n5", "Nodes to run on.")
+	skew      = pflag.String("skew", "", "Skew clock amount. (tiny, small, big, huge)")
+	testCount = pflag.IntP("test-count", "c", 1, "Test count per Jepsen test.")
+	jaeger    = pflag.StringP("jaeger", "j", "http://jaeger:14268",
+		"Run with Jaeger collector. Set to empty string to disable collection to Jaeger.")
 
 	// Jepsen control flags
-	doUp       = flag.Bool("up", true, "Run Jepsen ./up.sh.")
-	doUpOnly   = flag.Bool("up-only", false, "Do --up and exit.")
-	doDown     = flag.Bool("down", false, "Stop the Jepsen cluster after tests run.")
-	doDownOnly = flag.Bool("down-only", false, "Stop the Jepsen cluster and exit.")
-	doServe    = flag.Bool("serve", true, "Serve the test results page (lein run serve).")
+	doUp       = pflag.BoolP("up", "u", true, "Run Jepsen ./up.sh.")
+	doUpOnly   = pflag.BoolP("up-only", "U", false, "Do --up and exit.")
+	doDown     = pflag.BoolP("down", "d", false, "Stop the Jepsen cluster after tests run.")
+	doDownOnly = pflag.BoolP("down-only", "D", false, "Do --down and exit. Does not run tests.")
+	doServe    = pflag.Bool("serve", true, "Serve the test results page (lein run serve).")
+	web        = pflag.Bool("web", true, "Open the test results page in the browser.")
 
-	// Debug flags
-	dryRun = flag.Bool("dry-run", false, "Echo commands that would run, but don't execute them.")
+	// Script flags
+	dryRun = pflag.BoolP("dry-run", "y", false,
+		"Echo commands that would run, but don't execute them.")
+	jepsenRoot = pflag.StringP("jepsen-root", "r", "",
+		"Directory path to jepsen repo. This sets the JEPSEN_ROOT env var for Jepsen ./up.sh.")
+	ciOutput = pflag.BoolP("ci-output", "q", false,
+		"Output TeamCity test result directives instead of Jepsen test output.")
+	testAll = pflag.Bool("test-all", false,
+		"Run the following workload and nemesis combinations: "+
+			fmt.Sprintf("Workloads:%v, Nemeses:%v", testAllWorkloads, testAllNemeses))
 )
 
-func Command(command ...string) *exec.Cmd {
-	return CommandContext(ctxb, command...)
+func command(cmd ...string) *exec.Cmd {
+	return commandContext(ctxb, cmd...)
 }
 
-func CommandContext(ctx context.Context, command ...string) *exec.Cmd {
+func commandContext(ctx context.Context, cmd ...string) *exec.Cmd {
 	if *dryRun {
 		// Properly quote the args so the echoed output can run via copy/paste.
 		quoted := []string{}
-		for _, c := range command {
+		for _, c := range cmd {
 			if strings.Contains(c, " ") {
 				quoted = append(quoted, strconv.Quote(c))
 			} else {
@@ -130,26 +156,28 @@ func CommandContext(ctx context.Context, command ...string) *exec.Cmd {
 		}
 		return exec.CommandContext(ctx, "echo", quoted...)
 	}
-	return exec.CommandContext(ctx, command[0], command[1:]...)
+	return exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 }
 
 func jepsenUp() {
-	cmd := Command("./up.sh",
+	cmd := command("./up.sh",
 		"--dev", "--daemon", "--compose", "../dgraph/docker/docker-compose.yml")
-	cmd.Dir = os.Getenv("JEPSEN_ROOT") + "/docker/"
+	cmd.Dir = *jepsenRoot + "/docker/"
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	env := os.Environ()
+	cmd.Env = append(env, fmt.Sprintf("JEPSEN_ROOT=%s", *jepsenRoot))
 	if err := cmd.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func jepsenDown() {
-	cmd := Command("docker-compose",
+	cmd := command("docker-compose",
 		"-f", "./docker-compose.yml",
 		"-f", "../dgraph/docker/docker-compose.yml",
 		"down")
-	cmd.Dir = os.Getenv("JEPSEN_ROOT") + "/docker/"
+	cmd.Dir = *jepsenRoot + "/docker/"
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -158,14 +186,29 @@ func jepsenDown() {
 }
 
 func jepsenServe() {
-	cmd := Command(
+	cmd := command(
 		"docker", "exec", "--workdir", "/jepsen/dgraph", "jepsen-control",
 		"lein", "run", "serve")
 	// Ignore output and errors. It's okay if "lein run serve" already ran before.
 	_ = cmd.Run()
 }
 
-func runJepsenTest(test *JepsenTest) int {
+func openJepsenBrowser() {
+	cmd := command(
+		"docker", "inspect", "--format",
+		`{{ (index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort }}`,
+		"jepsen-control")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		log.Fatal(err)
+	}
+	port := strings.TrimSpace(out.String())
+	jepsenUrl := "http://localhost:" + port
+	browser.Open(jepsenUrl)
+}
+
+func runJepsenTest(test *jepsenTest) int {
 	dockerCmd := []string{
 		"docker", "exec", "jepsen-control",
 		"/bin/bash", "-c",
@@ -190,15 +233,16 @@ func runJepsenTest(test *JepsenTest) int {
 	}
 	if *jaeger != "" {
 		testCmd = append(testCmd, "--dgraph-jaeger-collector", *jaeger)
+		testCmd = append(testCmd, "--tracing", *jaeger+"/api/traces")
 	}
-	command := append(dockerCmd, strings.Join(testCmd, " "))
+	dockerCmd = append(dockerCmd, strings.Join(testCmd, " "))
 
 	// Timeout should be a bit longer than the Jepsen test time limit to account
 	// for post-analysis time.
 	commandTimeout := 10*time.Minute + time.Duration(test.timeLimit)*time.Second
 	ctx, cancel := context.WithTimeout(ctxb, commandTimeout)
 	defer cancel()
-	cmd := CommandContext(ctx, command...)
+	cmd := commandContext(ctx, dockerCmd...)
 
 	var out bytes.Buffer
 	var stdout io.Writer
@@ -217,19 +261,18 @@ func runJepsenTest(test *JepsenTest) int {
 		// TODO The exit code could probably be checked instead of checking the output.
 		// Check jepsen source to be sure.
 		if strings.Contains(out.String(), "Analysis invalid") {
-			return TestFail
-		} else {
-			return TestIncomplete
+			return testFail
 		}
+		return testIncomplete
 	}
 	if strings.Contains(out.String(), "Everything looks good!") {
-		return TestPass
+		return testPass
 	}
-	return TestIncomplete
+	return testIncomplete
 }
 
 func inCi() bool {
-	return os.Getenv("TEAMCITY_VERSION") != ""
+	return *ciOutput || os.Getenv("TEAMCITY_VERSION") != ""
 }
 
 func tcStart(testName string) func(pass int) {
@@ -241,11 +284,11 @@ func tcStart(testName string) func(pass int) {
 	return func(pass int) {
 		durMs := time.Since(now).Nanoseconds() / 1e6
 		switch pass {
-		case TestPass:
+		case testPass:
 			fmt.Printf("##teamcity[testFinished name='%v' duration='%v']\n", testName, durMs)
-		case TestFail:
+		case testFail:
 			fmt.Printf("##teamcity[testFailed='%v' duration='%v']\n", testName, durMs)
-		case TestIncomplete:
+		case testIncomplete:
 			fmt.Printf("##teamcity[testFailed='%v' duration='%v' message='Test incomplete.']\n",
 				testName, durMs)
 		}
@@ -253,42 +296,71 @@ func tcStart(testName string) func(pass int) {
 }
 
 func main() {
-	flag.Parse()
+	pflag.ErrHelp = errors.New("")
+	pflag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		pflag.PrintDefaults()
 
-	if os.Getenv("JEPSEN_ROOT") == "" {
-		log.Fatal("JEPSEN_ROOT must be set.")
+		fmt.Printf("\nExample usage:\n")
+		fmt.Printf("$ %v --jepsen-root $JEPSEN_ROOT -w bank -n none\n", os.Args[0])
+		fmt.Printf("$ %v --jepsen-root $JEPSEN_ROOT -w 'bank delete' "+
+			"-n 'none kill-alpha,kill-zero move-tablet'\n", os.Args[0])
+		fmt.Printf("$ %v --jepsen-root $JEPSEN_ROOT --test-all\n", os.Args[0])
+	}
+	pflag.Parse()
+
+	if *jepsenRoot == "" {
+		log.Fatal("--jepsen-root must be set.")
 	}
 	if os.Getenv("GOPATH") == "" {
 		log.Fatal("GOPATH must be set.")
-	}
-	if strings.Contains(*nemesis, "skew-clock") && *skew == "" {
-		log.Fatal("skew-clock nemesis specified but --jepsen.skew wasn't set.")
 	}
 
 	if *doDownOnly {
 		jepsenDown()
 		os.Exit(0)
 	}
+	if *doUpOnly {
+		jepsenUp()
+		os.Exit(0)
+	}
+
+	if *testAll {
+		*workload = strings.Join(testAllWorkloads, " ")
+		*nemesis = strings.Join(testAllNemeses, " ")
+	}
+
+	if *workload == "" || *nemesis == "" {
+		fmt.Fprintf(os.Stderr, "You must specify at least one workload and at least one nemesis.\n")
+		fmt.Fprintf(os.Stderr, "See --help for example usage.\n")
+		os.Exit(1)
+	}
+
+	if strings.Contains(*nemesis, "skew-clock") && *skew == "" {
+		log.Fatal("skew-clock nemesis specified but --jepsen.skew wasn't set.")
+	}
+
 	if *doUp {
 		jepsenUp()
-		if *doUpOnly {
-			os.Exit(0)
-		}
 	}
 	if *doServe {
 		go jepsenServe()
+		if *web && !*dryRun {
+			openJepsenBrowser()
+		}
+	}
+	if *web && !*dryRun && *jaeger != "" {
+		// Open Jaeger UI
+		browser.Open("http://localhost:16686")
 	}
 
-	workloads := strings.Split(*workload, ",")
+	workloads := strings.Split(*workload, " ")
 	nemeses := strings.Split(*nemesis, " ")
-
-	numTests := len(workloads) * len(nemeses)
-	fmt.Printf("Num tests: %v\n", numTests)
-
+	fmt.Printf("Num tests: %v\n", len(workloads)*len(nemeses))
 	for _, n := range nemeses {
 		for _, w := range workloads {
 			tcEnd := tcStart(fmt.Sprintf("Workload:%v,Nemeses:%v", w, n))
-			pass := runJepsenTest(&JepsenTest{
+			status := runJepsenTest(&jepsenTest{
 				workload:          w,
 				nemesis:           n,
 				timeLimit:         *timeLimit,
@@ -299,7 +371,7 @@ func main() {
 				skew:              *skew,
 				testCount:         *testCount,
 			})
-			tcEnd(pass)
+			tcEnd(status)
 		}
 	}
 

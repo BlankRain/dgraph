@@ -1,15 +1,15 @@
-#!/bin/bash -e
+#!/bin/bash
 
+set -e
 readonly ME=${0##*/}
 readonly SRCDIR=$(dirname $0)
 
-QUERY_DIR=$SRCDIR/queries
-BENCHMARKS_REPO="https://github.com/dgraph-io/benchmarks"
-SCHEMA_URL="$BENCHMARKS_REPO/blob/master/data/21million.schema?raw=true"
-DATA_URL="$BENCHMARKS_REPO/blob/master/data/21million.rdf.gz?raw=true"
+BENCHMARKS_REPO="${BENCHMARKS_REPO:-$(go env GOPATH)/src/github.com/dgraph-io/benchmarks}"
+SCHEMA_FILE="$BENCHMARKS_REPO/data/21million.schema"
+DATA_FILE="$BENCHMARKS_REPO/data/21million.rdf.gz"
 
 # this may be used to load a smaller data set when testing the test itself
-#DATA_URL="$BENCHMARKS_REPO/blob/master/data/goldendata.rdf.gz?raw=true"
+#DATA_FILE="$BENCHMARKS_REPO/data/goldendata.rdf.gz"
 
 function Info {
     echo -e "INFO: $*"
@@ -75,6 +75,11 @@ elif [[ $CLEANUP != all && $CLEANUP != servers && $CLEANUP != none ]]; then
     exit 1
 fi
 
+# default to quiet mode if diffs are being saved in a directory
+if [[ -n $SAVEDIR ]]; then
+    QUIET=yes
+fi
+
 Info "entering directory $SRCDIR"
 cd $SRCDIR
 
@@ -93,24 +98,33 @@ DockerCompose logs -f zero1 | grep -q -m1 "I've become the leader"
 
 if [[ $LOADER == bulk ]]; then
     Info "bulk loading data set"
-    DockerCompose run --name bulk_load --rm alpha1 \
+    DockerCompose run -v $BENCHMARKS_REPO:$BENCHMARKS_REPO --name bulk_load zero1 \
         bash -s <<EOF
-            /gobin/dgraph bulk --schema=<(curl -LSs $SCHEMA_URL) --files=<(curl -LSs $DATA_URL) \
-                               --format=rdf --zero=zero1:5080 --out=/data/alpha1/bulk
-            mv /data/alpha1/bulk/0/p /data/alpha1
+            mkdir -p /data/alpha1
+            mkdir -p /data/alpha2
+            mkdir -p /data/alpha3
+            /gobin/dgraph bulk --schema=$SCHEMA_FILE --files=$DATA_FILE \
+                               --format=rdf --zero=zero1:5180 --out=/data/zero1/bulk \
+                               --reduce_shards 3 --map_shards 9
+            mv /data/zero1/bulk/0/p /data/alpha1
+            mv /data/zero1/bulk/1/p /data/alpha2
+            mv /data/zero1/bulk/2/p /data/alpha3
 EOF
 fi
 
 Info "bringing up alpha container"
-DockerCompose up -d --force-recreate alpha1
+DockerCompose up -d --force-recreate alpha1 alpha2 alpha3
 
 Info "waiting for alpha to be ready"
 DockerCompose logs -f alpha1 | grep -q -m1 "Server is ready"
+# after the server prints the log "Server is ready", it may be still loading data from badger
+Info "sleeping for 10 seconds for the server to be ready"
+sleep 10
 
 if [[ $LOADER == live ]]; then
     Info "live loading data set"
-    dgraph live --schema=<(curl -LSs $SCHEMA_URL) --files=<(curl -LSs $DATA_URL) \
-                --format=rdf --zero=:5080 --alpha=:9180 --logtostderr
+    dgraph live --schema=$SCHEMA_FILE --files=$DATA_FILE \
+                --format=rdf --zero=:5180 --alpha=:9180 --logtostderr
 fi
 
 if [[ $LOAD_ONLY ]]; then
@@ -123,6 +137,11 @@ SAVEDIR=${SAVEDIR:+-savedir=$SAVEDIR}
 QUIET=${QUIET:+-quiet}
 
 Info "running benchmarks/regression queries"
+
+if [[ ! -z "$TEAMCITY_VERSION" ]]; then
+    # Make TeamCity aware of Go tests
+    export GOFLAGS="-json"
+fi
 go test -v -tags standalone $SAVEDIR $QUIET || FOUND_DIFFS=1
 
 if [[ $CLEANUP == all ]]; then

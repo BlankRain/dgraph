@@ -19,23 +19,23 @@ package query
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/golang/glog"
+	"github.com/pkg/errors"
 	geom "github.com/twpayne/go-geom"
 	"github.com/twpayne/go-geom/encoding/geojson"
 
-	"github.com/dgraph-io/dgo/protos/api"
+	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/dgraph-io/dgraph/algo"
+	"github.com/dgraph-io/dgraph/protos/pb"
+	"github.com/dgraph-io/dgraph/task"
 	"github.com/dgraph-io/dgraph/types"
+	"github.com/dgraph-io/dgraph/types/facets"
 	"github.com/dgraph-io/dgraph/x"
-)
-
-const (
-	normalizeLimit = 10000
 )
 
 // ToJson converts the list of subgraph into a JSON response by calling toFastJSON.
@@ -63,7 +63,6 @@ type outputNode interface {
 	SetUID(uid uint64, attr string)
 	IsEmpty() bool
 
-	addCountAtRoot(*SubGraph)
 	addGroupby(*SubGraph, *groupResults, string)
 	addAggregations(*SubGraph) error
 }
@@ -194,14 +193,23 @@ func (n nodeSlice) Swap(i, j int) {
 	n[i], n[j] = n[j], n[i]
 }
 
-func (fj *fastJsonNode) writeKey(out *bytes.Buffer) {
-	out.WriteRune('"')
-	out.WriteString(fj.attr)
-	out.WriteRune('"')
-	out.WriteRune(':')
+func (fj *fastJsonNode) writeKey(out *bytes.Buffer) error {
+	if _, err := out.WriteRune('"'); err != nil {
+		return err
+	}
+	if _, err := out.WriteString(fj.attr); err != nil {
+		return err
+	}
+	if _, err := out.WriteRune('"'); err != nil {
+		return err
+	}
+	if _, err := out.WriteRune(':'); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (fj *fastJsonNode) encode(out *bytes.Buffer) {
+func (fj *fastJsonNode) encode(out *bytes.Buffer) error {
 	// set relative ordering
 	for i, a := range fj.attrs {
 		a.order = i
@@ -209,7 +217,9 @@ func (fj *fastJsonNode) encode(out *bytes.Buffer) {
 
 	i := 0
 	if i < len(fj.attrs) {
-		out.WriteRune('{')
+		if _, err := out.WriteRune('{'); err != nil {
+			return err
+		}
 		cur := fj.attrs[i]
 		i++
 		cnt := 1
@@ -227,48 +237,78 @@ func (fj *fastJsonNode) encode(out *bytes.Buffer) {
 			if !last {
 				if cur.attr == next.attr {
 					if cnt == 1 {
-						cur.writeKey(out)
-						out.WriteRune('[')
+						if err := cur.writeKey(out); err != nil {
+							return err
+						}
+						if _, err := out.WriteRune('['); err != nil {
+							return err
+						}
 						inArray = true
 					}
-					cur.encode(out)
+					if err := cur.encode(out); err != nil {
+						return err
+					}
 					cnt++
 				} else {
 					if cnt == 1 {
-						cur.writeKey(out)
+						if err := cur.writeKey(out); err != nil {
+							return err
+						}
 						if cur.isChild || cur.list {
-							out.WriteRune('[')
+							if _, err := out.WriteRune('['); err != nil {
+								return err
+							}
 							inArray = true
 						}
 					}
-					cur.encode(out)
+					if err := cur.encode(out); err != nil {
+						return err
+					}
 					if cnt != 1 || (cur.isChild || cur.list) {
-						out.WriteRune(']')
+						if _, err := out.WriteRune(']'); err != nil {
+							return err
+						}
 						inArray = false
 					}
 					cnt = 1
 				}
-				out.WriteRune(',')
+				if _, err := out.WriteRune(','); err != nil {
+					return err
+				}
 
 				cur = next
 			} else {
 				if cnt == 1 {
-					cur.writeKey(out)
+					if err := cur.writeKey(out); err != nil {
+						return err
+					}
 				}
 				if (cur.isChild || cur.list) && !inArray {
-					out.WriteRune('[')
+					if _, err := out.WriteRune('['); err != nil {
+						return err
+					}
 				}
-				cur.encode(out)
+				if err := cur.encode(out); err != nil {
+					return err
+				}
 				if cnt != 1 || (cur.isChild || cur.list) {
-					out.WriteRune(']')
+					if _, err := out.WriteRune(']'); err != nil {
+						return err
+					}
 				}
 				break
 			}
 		}
-		out.WriteRune('}')
+		if _, err := out.WriteRune('}'); err != nil {
+			return err
+		}
 	} else {
-		out.Write(fj.scalarVal)
+		if _, err := out.Write(fj.scalarVal); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 func merge(parent [][]*fastJsonNode, child [][]*fastJsonNode) ([][]*fastJsonNode, error) {
@@ -282,8 +322,9 @@ func merge(parent [][]*fastJsonNode, child [][]*fastJsonNode) ([][]*fastJsonNode
 	for _, pa := range parent {
 		for _, ca := range child {
 			cnt += len(pa) + len(ca)
-			if cnt > normalizeLimit {
-				return nil, x.Errorf("Couldn't evaluate @normalize directive - to many results")
+			if cnt > x.Config.NormalizeNodeLimit {
+				return nil, errors.Errorf(
+					"Couldn't evaluate @normalize directive - too many results")
 			}
 			list := make([]*fastJsonNode, 0, len(pa)+len(ca))
 			list = append(list, pa...)
@@ -294,10 +335,19 @@ func merge(parent [][]*fastJsonNode, child [][]*fastJsonNode) ([][]*fastJsonNode
 	return mergedList, nil
 }
 
+// normalize returns all attributes of fj and its children (if any).
 func (fj *fastJsonNode) normalize() ([][]*fastJsonNode, error) {
 	cnt := 0
 	for _, a := range fj.attrs {
-		if a.isChild {
+		// Here we are counting all non-scalar attributes of fj. If there are any such
+		// attributes, we will flatten it, otherwise we will return all attributes.
+
+		// When we call addMapChild it tries to find whether there is already an attribute
+		// with attr field same as attribute argument of addMapChild. If it doesn't find any
+		// such attribute, it creates an attribute with isChild = false. In those cases
+		// sometimes cnt remains zero  and normalize returns attributes without flattening.
+		// So we are using len(a.attrs) > 0 instead of a.isChild
+		if len(a.attrs) > 0 {
 			cnt++
 		}
 	}
@@ -313,7 +363,8 @@ func (fj *fastJsonNode) normalize() ([][]*fastJsonNode, error) {
 	// merged with children later.
 	attrs := make([]*fastJsonNode, 0, len(fj.attrs)-cnt)
 	for _, a := range fj.attrs {
-		if !a.isChild {
+		// Check comment at previous occurrence of len(a.attrs) > 0
+		if len(a.attrs) == 0 {
 			attrs = append(attrs, a)
 		}
 	}
@@ -321,17 +372,14 @@ func (fj *fastJsonNode) normalize() ([][]*fastJsonNode, error) {
 
 	for ci := 0; ci < len(fj.attrs); {
 		childNode := fj.attrs[ci]
-		if !childNode.isChild {
+		// Check comment at previous occurrence of len(a.attrs) > 0
+		if len(childNode.attrs) == 0 {
 			ci++
 			continue
 		}
 		childSlice := make([][]*fastJsonNode, 0, 5)
 		for ci < len(fj.attrs) && childNode.attr == fj.attrs[ci].attr {
-			normalized, err := fj.attrs[ci].normalize()
-			if err != nil {
-				return nil, err
-			}
-			childSlice = append(childSlice, normalized...)
+			childSlice = append(childSlice, fj.attrs[ci].attrs)
 			ci++
 		}
 		// Merging with parent.
@@ -385,24 +433,12 @@ func (fj *fastJsonNode) addGroupby(sg *SubGraph, res *groupResults, fname string
 	fj.AddListChild(fname, g)
 }
 
-func (fj *fastJsonNode) addCountAtRoot(sg *SubGraph) {
-	c := types.ValueForType(types.IntID)
-	c.Value = int64(len(sg.DestUIDs.Uids))
-	n1 := fj.New(sg.Params.Alias)
-	field := sg.Params.uidCountAlias
-	if field == "" {
-		field = "count"
-	}
-	n1.AddValue(field, c)
-	fj.AddListChild(sg.Params.Alias, n1)
-}
-
 func (fj *fastJsonNode) addAggregations(sg *SubGraph) error {
 	for _, child := range sg.Children {
-		aggVal, ok := child.Params.uidToVal[0]
+		aggVal, ok := child.Params.UidToVal[0]
 		if !ok {
 			if len(child.Params.NeedsVar) == 0 {
-				return x.Errorf("Only aggregated variables allowed within empty block.")
+				return errors.Errorf("Only aggregated variables allowed within empty block.")
 			}
 			// the aggregation didn't happen, most likely was called with unset vars.
 			// See: query.go:fillVars
@@ -422,6 +458,32 @@ func (fj *fastJsonNode) addAggregations(sg *SubGraph) error {
 	return nil
 }
 
+func handleCountUIDNodes(sg *SubGraph, n outputNode, count int) bool {
+	addedNewChild := false
+	fieldName := sg.fieldName()
+	for _, child := range sg.Children {
+		uidCount := child.Attr == "uid" && child.Params.DoCount && child.IsInternal()
+		normWithoutAlias := child.Params.Alias == "" && child.Params.Normalize
+		if uidCount && !normWithoutAlias {
+			addedNewChild = true
+
+			c := types.ValueForType(types.IntID)
+			c.Value = int64(count)
+
+			field := child.Params.Alias
+			if field == "" {
+				field = "count"
+			}
+
+			fjChild := n.New(fieldName)
+			fjChild.AddValue(field, c)
+			n.AddListChild(fieldName, fjChild)
+		}
+	}
+
+	return addedNewChild
+}
+
 func processNodeUids(fj *fastJsonNode, sg *SubGraph) error {
 	var seedNode *fastJsonNode
 	if sg.Params.IsEmpty {
@@ -433,15 +495,10 @@ func processNodeUids(fj *fastJsonNode, sg *SubGraph) error {
 		return nil
 	}
 
-	hasChild := false
-	if sg.Params.uidCount && !(sg.Params.uidCountAlias == "" && sg.Params.Normalize) {
-		hasChild = true
-		fj.addCountAtRoot(sg)
-	}
-
-	if sg.Params.isGroupBy {
+	hasChild := handleCountUIDNodes(sg, fj, len(sg.DestUIDs.Uids))
+	if sg.Params.IsGroupBy {
 		if len(sg.GroupbyRes) == 0 {
-			return x.Errorf("Expected GroupbyRes to have length > 0.")
+			return errors.Errorf("Expected GroupbyRes to have length > 0.")
 		}
 		fj.addGroupby(sg, sg.GroupbyRes[0], sg.Params.Alias)
 		return nil
@@ -490,14 +547,17 @@ func processNodeUids(fj *fastJsonNode, sg *SubGraph) error {
 	return nil
 }
 
+// Extensions represents the extra information appended to query results.
 type Extensions struct {
 	Latency *api.Latency    `json:"server_latency,omitempty"`
 	Txn     *api.TxnContext `json:"txn,omitempty"`
+	Metrics *api.Metrics    `json:"metrics,omitempty"`
 }
 
 func (sg *SubGraph) toFastJSON(l *Latency) ([]byte, error) {
+	encodingStart := time.Now()
 	defer func() {
-		l.Json = time.Since(l.Start) - l.Parsing - l.Processing
+		l.Json = time.Since(encodingStart)
 	}()
 
 	var seedNode *fastJsonNode
@@ -516,9 +576,333 @@ func (sg *SubGraph) toFastJSON(l *Latency) ([]byte, error) {
 
 	var bufw bytes.Buffer
 	if len(n.(*fastJsonNode).attrs) == 0 {
-		bufw.WriteString(`{}`)
+		if _, err := bufw.WriteString(`{}`); err != nil {
+			return nil, err
+		}
 	} else {
-		n.(*fastJsonNode).encode(&bufw)
+		if err := n.(*fastJsonNode).encode(&bufw); err != nil {
+			return nil, err
+		}
 	}
 	return bufw.Bytes(), nil
+}
+
+func (sg *SubGraph) fieldName() string {
+	fieldName := sg.Attr
+	if sg.Params.Alias != "" {
+		fieldName = sg.Params.Alias
+	}
+	return fieldName
+}
+
+func addCount(pc *SubGraph, count uint64, dst outputNode) {
+	if pc.Params.Normalize && pc.Params.Alias == "" {
+		return
+	}
+	c := types.ValueForType(types.IntID)
+	c.Value = int64(count)
+	fieldName := pc.Params.Alias
+	if fieldName == "" {
+		fieldName = fmt.Sprintf("count(%s)", pc.Attr)
+	}
+	dst.AddValue(fieldName, c)
+}
+
+func aggWithVarFieldName(pc *SubGraph) string {
+	if pc.Params.Alias != "" {
+		return pc.Params.Alias
+	}
+	fieldName := fmt.Sprintf("val(%v)", pc.Params.Var)
+	if len(pc.Params.NeedsVar) > 0 {
+		fieldName = fmt.Sprintf("val(%v)", pc.Params.NeedsVar[0].Name)
+		if pc.SrcFunc != nil {
+			fieldName = fmt.Sprintf("%s(%v)", pc.SrcFunc.Name, fieldName)
+		}
+	}
+	return fieldName
+}
+
+func addInternalNode(pc *SubGraph, uid uint64, dst outputNode) error {
+	sv, ok := pc.Params.UidToVal[uid]
+	if !ok || sv.Value == nil {
+		return nil
+	}
+	fieldName := aggWithVarFieldName(pc)
+	dst.AddValue(fieldName, sv)
+	return nil
+}
+
+func addCheckPwd(pc *SubGraph, vals []*pb.TaskValue, dst outputNode) {
+	c := types.ValueForType(types.BoolID)
+	if len(vals) == 0 {
+		c.Value = false
+	} else {
+		c.Value = task.ToBool(vals[0])
+	}
+
+	fieldName := pc.Params.Alias
+	if fieldName == "" {
+		fieldName = fmt.Sprintf("checkpwd(%s)", pc.Attr)
+	}
+	dst.AddValue(fieldName, c)
+}
+
+func alreadySeen(parentIds []uint64, uid uint64) bool {
+	for _, id := range parentIds {
+		if id == uid {
+			return true
+		}
+	}
+	return false
+}
+
+func facetName(fieldName string, f *api.Facet) string {
+	if f.Alias != "" {
+		return f.Alias
+	}
+	return fieldName + x.FacetDelimeter + f.Key
+}
+
+// This method gets the values and children for a subprotos.
+func (sg *SubGraph) preTraverse(uid uint64, dst outputNode) error {
+	if sg.Params.IgnoreReflex {
+		if alreadySeen(sg.Params.ParentIds, uid) {
+			// A node can't have itself as the child at any level.
+			return nil
+		}
+		// Push myself to stack before sending this to children.
+		sg.Params.ParentIds = append(sg.Params.ParentIds, uid)
+	}
+
+	var invalidUids map[uint64]bool
+	// We go through all predicate children of the subprotos.
+	for _, pc := range sg.Children {
+		if pc.Params.IgnoreResult {
+			continue
+		}
+		if pc.IsInternal() {
+			if pc.Params.Expand != "" {
+				continue
+			}
+			if pc.Params.Normalize && pc.Params.Alias == "" {
+				continue
+			}
+			if err := addInternalNode(pc, uid, dst); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if len(pc.uidMatrix) == 0 {
+			// Can happen in recurse query.
+			continue
+		}
+		if len(pc.facetsMatrix) > 0 && len(pc.facetsMatrix) != len(pc.uidMatrix) {
+			return errors.Errorf("Length of facetsMatrix and uidMatrix mismatch: %d vs %d",
+				len(pc.facetsMatrix), len(pc.uidMatrix))
+		}
+
+		idx := algo.IndexOf(pc.SrcUIDs, uid)
+		if idx < 0 {
+			continue
+		}
+		if pc.Params.IsGroupBy {
+			if len(pc.GroupbyRes) <= idx {
+				return errors.Errorf("Unexpected length while adding Groupby. Idx: [%v], len: [%v]",
+					idx, len(pc.GroupbyRes))
+			}
+			dst.addGroupby(pc, pc.GroupbyRes[idx], pc.fieldName())
+			continue
+		}
+
+		fieldName := pc.fieldName()
+		if len(pc.counts) > 0 {
+			addCount(pc, uint64(pc.counts[idx]), dst)
+
+		} else if pc.SrcFunc != nil && pc.SrcFunc.Name == "checkpwd" {
+			addCheckPwd(pc, pc.valueMatrix[idx].Values, dst)
+
+		} else if idx < len(pc.uidMatrix) && len(pc.uidMatrix[idx].Uids) > 0 {
+			var fcsList []*pb.Facets
+			if pc.Params.Facet != nil {
+				fcsList = pc.facetsMatrix[idx].FacetsList
+			}
+
+			if sg.Params.IgnoreReflex {
+				pc.Params.ParentIds = sg.Params.ParentIds
+			}
+
+			// We create as many predicate entity children as the length of uids for
+			// this predicate.
+			ul := pc.uidMatrix[idx]
+			for childIdx, childUID := range ul.Uids {
+				if fieldName == "" || (invalidUids != nil && invalidUids[childUID]) {
+					continue
+				}
+				uc := dst.New(fieldName)
+				if rerr := pc.preTraverse(childUID, uc); rerr != nil {
+					if rerr.Error() == "_INV_" {
+						if invalidUids == nil {
+							invalidUids = make(map[uint64]bool)
+						}
+
+						invalidUids[childUID] = true
+						continue // next UID.
+					}
+					// Some other error.
+					glog.Errorf("Error while traversal: %v", rerr)
+					return rerr
+				}
+
+				if pc.Params.Facet != nil && len(fcsList) > childIdx {
+					fs := fcsList[childIdx]
+					for _, f := range fs.Facets {
+						fVal, err := facets.ValFor(f)
+						if err != nil {
+							return err
+						}
+
+						uc.AddValue(facetName(fieldName, f), fVal)
+					}
+				}
+
+				if !uc.IsEmpty() {
+					if sg.Params.GetUid {
+						uc.SetUID(childUID, "uid")
+					}
+					if pc.Params.Normalize {
+						// We will normalize at each level instead of
+						// calling normalize after pretraverse.
+						// Now normalize() only flattens one level,
+						// the expectation is that its children have
+						// already been normalized.
+						normAttrs, err := uc.(*fastJsonNode).normalize()
+						if err != nil {
+							return err
+						}
+
+						for _, c := range normAttrs {
+							// Adding as list child irrespective of the type of pc
+							// (list or non-list), otherwise result might be inconsistent or might
+							// depend on children and grandchildren of pc. Consider the case:
+							// 	boss: uid .
+							// 	friend: [uid] .
+							// 	name: string .
+							// For query like:
+							// {
+							// 	me(func: uid(0x1)) {
+							// 		boss @normalize {
+							// 			name
+							// 		}
+							// 	}
+							// }
+							// boss will be non list type in response, but for query like:
+							// {
+							// 	me(func: uid(0x1)) {
+							// 		boss @normalize {
+							// 			friend {
+							// 				name
+							// 			}
+							// 		}
+							// 	}
+							// }
+							// boss should be of list type because there can be mutliple friends of
+							// boss.
+							dst.AddListChild(fieldName, &fastJsonNode{attrs: c})
+						}
+						continue
+					}
+					if pc.List {
+						dst.AddListChild(fieldName, uc)
+					} else {
+						dst.AddMapChild(fieldName, uc, false)
+					}
+				}
+			}
+
+			// add value for count(uid) nodes if any.
+			_ = handleCountUIDNodes(pc, dst, len(ul.Uids))
+		} else {
+			if pc.Params.Alias == "" && len(pc.Params.Langs) > 0 {
+				fieldName += "@"
+				fieldName += strings.Join(pc.Params.Langs, ":")
+			}
+
+			if pc.Attr == "uid" {
+				dst.SetUID(uid, pc.fieldName())
+				continue
+			}
+
+			if len(pc.facetsMatrix) > idx && len(pc.facetsMatrix[idx].FacetsList) > 0 {
+				// in case of Value we have only one Facets
+				for _, f := range pc.facetsMatrix[idx].FacetsList[0].Facets {
+					fVal, err := facets.ValFor(f)
+					if err != nil {
+						return err
+					}
+
+					dst.AddValue(facetName(fieldName, f), fVal)
+				}
+			}
+
+			if len(pc.valueMatrix) <= idx {
+				continue
+			}
+
+			for i, tv := range pc.valueMatrix[idx].Values {
+				// if conversion not possible, we ignore it in the result.
+				sv, convErr := convertWithBestEffort(tv, pc.Attr)
+				if convErr != nil {
+					return convErr
+				}
+
+				if pc.Params.ExpandAll && len(pc.LangTags[idx].Lang) != 0 {
+					if i >= len(pc.LangTags[idx].Lang) {
+						return errors.Errorf(
+							"pb.error: all lang tags should be either present or absent")
+					}
+					fieldNameWithTag := fieldName
+					lang := pc.LangTags[idx].Lang[i]
+					if lang != "" {
+						fieldNameWithTag += "@" + lang
+					}
+					encodeAsList := pc.List && len(lang) == 0
+					dst.AddListValue(fieldNameWithTag, sv, encodeAsList)
+					continue
+				}
+
+				encodeAsList := pc.List && len(pc.Params.Langs) == 0
+				if !pc.Params.Normalize {
+					dst.AddListValue(fieldName, sv, encodeAsList)
+					continue
+				}
+				// If the query had the normalize directive, then we only add nodes
+				// with an Alias.
+				if pc.Params.Alias != "" {
+					dst.AddListValue(fieldName, sv, encodeAsList)
+				}
+			}
+		}
+	}
+
+	if sg.Params.IgnoreReflex && len(sg.Params.ParentIds) > 0 {
+		// Lets pop the stack.
+		sg.Params.ParentIds = (sg.Params.ParentIds)[:len(sg.Params.ParentIds)-1]
+	}
+
+	// Only for shortest path query we wan't to return uid always if there is
+	// nothing else at that level.
+	if (sg.Params.GetUid && !dst.IsEmpty()) || sg.Params.Shortest {
+		dst.SetUID(uid, "uid")
+	}
+
+	if sg.pathMeta != nil {
+		totalWeight := types.Val{
+			Tid:   types.FloatID,
+			Value: sg.pathMeta.weight,
+		}
+		dst.AddValue("_weight_", totalWeight)
+	}
+
+	return nil
 }

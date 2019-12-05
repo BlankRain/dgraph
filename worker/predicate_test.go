@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/dgraph-io/badger"
+	"github.com/dgraph-io/badger/v2"
 	"github.com/golang/glog"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -73,10 +73,10 @@ func commitTransaction(t *testing.T, edge *pb.DirectedEdge, l *posting.List) {
 
 	commit := commitTs(startTs)
 
+	txn.Update()
 	writer := posting.NewTxnWriter(pstore)
 	require.NoError(t, txn.CommitToDisk(writer, commit))
 	require.NoError(t, writer.Flush())
-	require.NoError(t, txn.CommitToMemory(commit))
 }
 
 // Hacky tests change laster
@@ -251,7 +251,7 @@ func TestPopulateShard(t *testing.T) {
 	//			return err
 	//		}
 	//		if len(val) == 0 {
-	//			return x.Errorf("value for uid 1 predicate name not found\n")
+	//			return errors.Errorf("value for uid 1 predicate name not found\n")
 	//		}
 	//		return nil
 	//	})
@@ -285,7 +285,7 @@ func TestPopulateShard(t *testing.T) {
 	//	}
 	//	require.NoError(t, item.Value(func(val []byte) error {
 	//		if len(val) != 0 {
-	//			return x.Errorf("value for uid 1 predicate name shouldn't be present\n")
+	//			return errors.Errorf("value for uid 1 predicate name shouldn't be present\n")
 	//		}
 	//		return nil
 	//	}))
@@ -295,7 +295,7 @@ func TestPopulateShard(t *testing.T) {
 	//	}
 	//	require.NoError(t, item.Value(func(val []byte) error {
 	//		if len(val) != 0 {
-	//			return x.Errorf("value for uid 1 predicate name shouldn't be present\n")
+	//			return errors.Errorf("value for uid 1 predicate name shouldn't be present\n")
 	//		}
 	//		return nil
 	//	}))

@@ -5,11 +5,6 @@ title = "Clients"
 
 ## Implementation
 
-{{% notice "note" %}}
-All mutations and queries run within the context of a transaction. This differs
-significantly from the interaction model pre v0.9.
-{{% /notice %}}
-
 Clients can communicate with the server in two different ways:
 
 - **Via [gRPC](http://www.grpc.io/).** Internally this uses [Protocol
@@ -35,6 +30,27 @@ Dgraph instances. For the Go client, this means passing in one
 fashion, resulting in an initially semi random predicate distribution.
 {{% /notice %}}
 
+### Transactions
+
+Dgraph clients perform mutations and queries using transactions. A
+transaction bounds a sequence of queries and mutations that are committed by
+Dgraph as a single unit: that is, on commit, either all the changes are accepted
+by Dgraph or none are.
+
+A transaction always sees the database state at the moment it began, plus any
+changes it makes --- changes from concurrent transactions aren't visible.
+
+On commit, Dgraph will abort a transaction, rather than committing changes, when
+a conflicting, concurrently running transaction has already been committed.  Two
+transactions conflict when both transactions:
+
+- write values to the same scalar predicate of the same node (e.g both
+  attempting to set a particular node's `address` predicate); or
+- write to a singular `uid` predicate of the same node (changes to `[uid]` predicates can be concurrently written); or
+- write a value that conflicts on an index for a predicate with `@upsert` set in the schema (see [upserts]({{< relref "howto/index.md#upserts">}})).
+
+When a transaction is aborted, all its changes are discarded.  Transactions can be manually aborted.
+
 ## Go
 
 [![GoDoc](https://godoc.org/github.com/dgraph-io/dgo?status.svg)](https://godoc.org/github.com/dgraph-io/dgo)
@@ -44,7 +60,9 @@ The Go client communicates with the server on the gRPC port (default value 9080)
 The client can be obtained in the usual way via `go get`:
 
 ```sh
-go get -u -v github.com/dgraph-io/dgo
+# Requires at least Go 1.11
+export GO111MODULE=on
+go get -u -v github.com/dgraph-io/dgo/v2
 ```
 
 The full [GoDoc](https://godoc.org/github.com/dgraph-io/dgo) contains
@@ -109,9 +127,19 @@ func setup(c *dgo.Dgraph) {
 }
 ```
 
-`api.Operation` contains other fields as well, including drop predicate and
-drop all. Drop all is useful if you wish to discard all the data, and start from
-a clean slate, without bringing the instance down.
+`api.Operation` contains other fields as well, including drop predicate and drop
+all. Drop all is useful if you wish to discard all the data, and start from a
+clean slate, without bringing the instance down.
+
+```go
+	// Drop all data including schema from the dgraph instance. This is useful
+	// for small examples such as this, since it puts dgraph into a clean
+	// state.
+	err := c.Alter(context.Background(), &api.Operation{DropOp: api.Operation_ALL})
+```
+
+The old way to send a drop all operation is still supported but will be eventually
+deprecated. It's shown below for reference.
 
 ```go
 	// Drop all data including schema from the dgraph instance. This is useful
@@ -120,9 +148,20 @@ a clean slate, without bringing the instance down.
 	err := c.Alter(context.Background(), &api.Operation{DropAll: true})
 ```
 
+Starting with version 1.1, `api.Operation` also supports a drop data operation.
+This operation drops all the data but preserves the schema. This is useful when
+the schema is large and needs to be reused, such as in between unit tests.
+
+```go
+	// Drop all data including schema from the dgraph instance. This is useful
+	// for small examples such as this, since it puts dgraph into a clean
+	// state.
+	err := c.Alter(context.Background(), &api.Operation{DropOp: api.Operation_DATA})
+```
+
 ### Create a transaction
 
-Dgraph v0.9 supports running distributed ACID transactions. To create a
+Dgraph supports running distributed ACID transactions. To create a
 transaction, just call `c.NewTxn()`. This operation incurs no network call.
 Typically, you'd also want to call a `defer txn.Discard()` to let it
 automatically rollback in case of errors. Calling `Discard` after `Commit` would
@@ -190,6 +229,15 @@ via `json.Unmarshal`.
 which provides two main ways to set data: JSON and RDF N-Quad. You can choose
 whichever way is convenient.
 
+To use JSON, use the fields SetJson and DeleteJson, which accept a string
+representing the nodes to be added or removed respectively (either as a JSON map
+or a list). To use RDF, use the fields SetNquads and DeleteNquads, which accept
+a string representing the valid RDF triples (one per line) to added or removed
+respectively. This protobuf object also contains the Set and Del fields which
+accept a list of RDF triples that have already been parsed into our internal
+format. As such, these fields are mainly used internally and users should use
+the SetNquads and DeleteNquads instead if they are planning on using RDF.
+
 We're going to continue using JSON. You could modify the Go structs parsed from
 the query, and marshal them back into JSON.
 
@@ -231,6 +279,7 @@ This is an example from the [GoDoc](https://godoc.org/github.com/dgraph-io/dgo).
 ```go
 type School struct {
 	Name string `json:"name,omitempty"`
+	DType []string `json:"dgraph.type,omitempty"`
 }
 
 type loc struct {
@@ -251,6 +300,7 @@ type Person struct {
 		Friends  []Person   `json:"friend,omitempty"`
 		Location loc        `json:"loc,omitempty"`
 		School   []School   `json:"school,omitempty"`
+		DType    []string   `json:"dgraph.type,omitempty"`
 }
 
 conn, err := grpc.Dial("127.0.0.1:9080", grpc.WithInsecure())
@@ -269,6 +319,27 @@ op.Schema = `
 	married: bool .
 	loc: geo .
 	dob: datetime .
+
+type Person {
+  name
+  age
+  dob
+  married
+  raw
+  friends
+  loc
+  school
+ }
+
+type Loc {
+  type
+  coords
+ }
+
+type Institution {
+  name
+ }
+
 `
 
 ctx := context.Background()
@@ -283,6 +354,7 @@ dob := time.Date(1980, 01, 01, 23, 0, 0, 0, time.UTC)
 // In the example below new nodes for Alice, Bob and Charlie and school are created (since they
 // dont have a Uid).
 p := Person{
+    Uid:     "_:alice",
 	Name:    "Alice",
 	Age:     26,
 	Married: true,
@@ -319,7 +391,7 @@ if err != nil {
 }
 
 // Assigned uids for nodes which were created would be returned in the resp.AssignedUids map.
-variables := map[string]string{"$id": assigned.Uids["blank-0"]}
+variables := map[string]string{"$id": assigned.Uids["alice"]}
 q := `query Me($id: string){
 	me(func: uid($id)) {
 		name
@@ -328,12 +400,15 @@ q := `query Me($id: string){
 		loc
 		raw_bytes
 		married
+		dgraph.type
 		friend @filter(eq(name, "Bob")){
 			name
 			age
+			dgraph.type
 		}
 		school {
 			name
+			dgraph.type
 		}
 	}
 }`
@@ -356,7 +431,7 @@ if err != nil {
 // R.Me would be same as the person that we set above.
 
 fmt.Println(string(resp.Json))
-// Output: {"me":[{"name":"Alice","dob":"1980-01-01T23:00:00Z","age":26,"loc":{"type":"Point","coordinates":[1.1,2]},"raw_bytes":"cmF3X2J5dGVz","married":true,"friend":[{"name":"Bob","age":24}],"school":[{"name":"Crown Public School"}]}]}
+// Output: {"me":[{"name":"Alice","dob":"1980-01-01T23:00:00Z","age":26,"loc":{"type":"Point","coordinates":[1.1,2]},"raw_bytes":"cmF3X2J5dGVz","married":true,"dgraph.type":["Person"],"friend":[{"name":"Bob","age":24,"dgraph.type":["Person"]}],"school":[{"name":"Crown Public School","dgraph.type":["Institution"]}]}]}
 
 
 ```
@@ -414,6 +489,10 @@ These third-party clients are contributed by the community and are not officiall
 - https://github.com/liveforeverx/dlex
 - https://github.com/ospaarmann/exdgraph
 
+### Rust
+
+- https://github.com/Swoorup/dgraph-rs
+
 ## Raw HTTP
 
 {{% notice "warning" %}}
@@ -436,10 +515,10 @@ Similar to the Go client example, we use a bank account transfer example.
 
 A client built on top of the HTTP API will need to track three pieces of state
 for each transaction.
-  
+
 1. A start timestamp (`start_ts`). This uniquely identifies a transaction,
    and doesn't change over the transaction lifecycle.
-  
+
 2. The set of keys modified by the transaction (`keys`). This aids in
    transaction conflict detection.
 
@@ -469,13 +548,24 @@ If all goes well, the response should be `{"code":"Success","message":"Done"}`.
 Other operations can be performed via the `/alter` endpoint as well. A specific
 predicate or the entire database can be dropped.
 
-E.g. to drop the predicate `name`:
+To drop the predicate `name`:
 ```sh
 $ curl -X POST localhost:8080/alter -d '{"drop_attr": "name"}'
 ```
+
+To drop the type `Film`:
+```sh
+$ curl -X POST localhost:8080/alter -d '{"drop_op": "TYPE", "drop_value": "Film"}'
+```
+
 To drop all data and schema:
 ```sh
 $ curl -X POST localhost:8080/alter -d '{"drop_all": true}'
+```
+
+To drop all data only (keep schema):
+```sh
+$ curl -X POST localhost:8080/alter -d '{"drop_op": "DATA"}'
 ```
 
 ### Start a transaction
@@ -501,12 +591,13 @@ new transaction is initiated.**
 
 ### Run a query
 
-To query the database, the `/query` endpoint is used.
+To query the database, the `/query` endpoint is used. Remember to set the `Content-Type` header
+to `application/graphql+-` in order to ensure that the body of the request is correctly parsed.
 
 To get the balances for both accounts:
 
 ```sh
-$ curl -X POST localhost:8080/query -d $'
+$ curl -H "Content-Type: application/graphql+-" -X POST localhost:8080/query -d $'
 {
   balances(func: anyofterms(name, "Alice Bob")) {
     uid
@@ -571,10 +662,12 @@ Note that we have to refer to the Alice and Bob nodes by UID in the RDF format.
 
 We now send the mutations via the `/mutate` endpoint. We need to provide our
 transaction start timestamp as a path parameter, so that Dgraph knows which
-transaction the mutation should be part of.
+transaction the mutation should be part of. We also need to set `Content-Type`
+header to `application/rdf` in order to specify that mutation is written in
+rdf format.
 
 ```sh
-$ curl -X POST localhost:8080/mutate/4 -d $'
+$ curl -H "Content-Type: application/rdf" -X POST localhost:8080/mutate?startTs=4 -d $'
 {
   set {
     <0x1> <balance> "110" .
@@ -595,18 +688,17 @@ The result:
   },
   "extensions": {
     "server_latency": {
-      "parsing_ns": 17000,
-      "processing_ns": 4722207
+      "parsing_ns": 50901,
+      "processing_ns": 14631082
     },
     "txn": {
       "start_ts": 4,
       "keys": [
-        "i4elpex2rwx3",
-        "nkvfdz3ltmvv"
-      ]
+        "2ahy9oh4s9csc",
+        "3ekeez23q5149"
+      ],
       "preds": [
-        "1-balance",
-        "1-_predicate_"
+        "1-balance"
       ]
     }
   }
@@ -622,7 +714,7 @@ transaction state. We also get some `preds`, which should be added to the set of
 {{% notice "note" %}}
 It's possible to commit immediately after a mutation is made (without requiring
 to use the `/commit` endpoint as explained in this section). To do this, add
-the `X-Dgraph-CommitNow: true` header to the final `/mutate` call.
+the parameter `commitNow` in the URL `/mutate?commitNow=true`.
 {{% /notice %}}
 
 Finally, we can commit the transaction using the `/commit` endpoint. We need the
@@ -636,18 +728,19 @@ predicates are moved. This field is not required and the `/commit` endpoint also
 accepts the old format, which was a single array of keys.
 
 ```sh
-$ curl -X POST localhost:8080/commit/4 -d $'
+$ curl -X POST localhost:8080/commit?startTs=4 -d $'
 {
-    "keys": [
-		"i4elpex2rwx3",
-		"nkvfdz3ltmvv"
+  "keys": [
+		"2ahy9oh4s9csc",
+		"3ekeez23q5149"
 	],
-	"preds": [
-		"1-predicate",
-		"1-name"
+  "preds": [
+    "1-balance"
 	]
 }' | jq
 ```
+
+The result:
 
 ```json
 {
@@ -683,6 +776,23 @@ successful.  This is indicated in the response when the commit is attempted.
 In this case, it should be up to the user of the client to decide if they wish
 to retry the transaction.
 
+### Aborting the transaction
+To abort a transaction, use the same `/commit` endpoint with the `abort=true` parameter
+while specifying the `startTs` value for the transaction.
+
+```sh
+$ curl -X POST "localhost:8080/commit?startTs=4&abort=true" | jq
+```
+
+The result:
+
+```json
+{
+  "code": "Success",
+  "message": "Done"
+}
+```
+
 ### Compression via HTTP
 
 Dgraph supports gzip-compressed requests to and from Dgraph Alphas for `/query`, `/mutate`, and `/alter`.
@@ -697,9 +807,9 @@ Example of a compressed request via curl:
 
 ```sh
 $ curl -X POST \
-  -H 'X-Dgraph-CommitNow: true' \
   -H 'Content-Encoding: gzip' \
-  localhost:8080/mutate --data-binary @mutation.gz
+  -H "Content-Type: application/rdf" \
+  localhost:8080/mutate?commitNow=true --data-binary @mutation.gz
 ```
 
 Example of a compressed request via curl:
@@ -707,6 +817,7 @@ Example of a compressed request via curl:
 ```sh
 $ curl -X POST \
   -H 'Accept-Encoding: gzip' \
+  -H "Content-Type: application/graphql+-" \
   localhost:8080/query -d $'schema {}' | gzip --decompress
 ```
 
@@ -726,6 +837,7 @@ $ zcat query.gz # query.gz is gzipped compressed
 $ curl -X POST \
   -H 'Content-Encoding: gzip' \
   -H 'Accept-Encoding: gzip' \
+  -H "Content-Type: application/graphql+-" \
   localhost:8080/query --data-binary @query.gz | gzip --decompress
 ```
 
@@ -733,6 +845,49 @@ $ curl -X POST \
 Curl has a `--compressed` option that automatically requests for a compressed response (`Accept-Encoding` header) and decompresses the compressed response.
 
 ```sh
-$ curl -X POST --compressed localhost:8080/query -d $'schema {}'
+$ curl -X POST --compressed -H "Content-Type: application/graphql+-" localhost:8080/query -d $'schema {}'
 ```
 {{% /notice %}}
+
+### Health Check and Alpha Info
+
+`/health` returns HTTP status code 200 if the worker is running, HTTP 503 otherwise.
+The body of the response contains information about the running alpha and its version.
+
+```sh
+$ curl localhost:8080/health
+```
+
+```json
+{
+  "version": "v1.1.0",
+  "instance": "alpha",
+  "uptime": 1928423
+}
+```
+
+Here, `uptime` is in nanoseconds (type `time.Duration` in Go).
+
+### Run a query in JSON format
+
+The HTTP API also accepts requests in JSON format. For queries you have the keys "query" and "variables". The JSON format is required to set [GraphQL Variables]({{< relref "query-language/index.md#graphql-variables" >}}) with the HTTP API.
+
+This query:
+
+```
+{
+  balances(func: anyofterms(name, "Alice Bob")) {
+    uid
+    name
+    balance
+  }
+}
+```
+
+Should be escaped to this:
+
+```sh
+curl -H "Content-Type: application/json" localhost:8080/query -XPOST -d '{
+    "query": "{\n balances(func: anyofterms(name, \"Alice Bob\")) {\n uid\n name\n balance\n }\n }"
+}' | python -m json.tool | jq
+```

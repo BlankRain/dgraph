@@ -49,17 +49,27 @@ dgraph
 #### Building from Source
 
 {{% notice "note" %}}
-Ratel UI is closed source right now, so you cannot build it from source. But you can connect to your Dgraph instance
-through Ratel UI installed using any of the methods listed above.
+You can build the Ratel UI from source seperately following its build
+[instructions](https://github.com/dgraph-io/ratel/blob/master/INSTRUCTIONS.md).
+Ratel UI is distributed via Dgraph releases using any of the download methods
+listed above.
 {{% /notice %}}
 
-Make sure you have [Go](https://golang.org/dl/) (version >= 1.8) installed.
+Make sure you have [Go](https://golang.org/dl/) v1.11+ installed.
+
+You'll need the following dependencies to install Dgraph using `make`:
+```bash
+sudo apt-get update
+sudo apt-get install gcc make
+```
 
 After installing Go, run
 ```sh
 # This should install dgraph binary in your $GOPATH/bin.
 
-go get -v github.com/dgraph-io/dgraph/dgraph
+git clone https://github.com/dgraph-io/dgraph.git
+cd ./dgraph
+make install
 ```
 
 If you get errors related to `grpc` while building them, your
@@ -909,13 +919,13 @@ ip-172-20-61-73.us-west-2.compute.internal    Ready     node      2h        v1.8
 
 ### Single Server
 
-Once your Kubernetes cluster is up, you can use [dgraph-single.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-single.yaml) to start a Zero and Alpha.
+Once your Kubernetes cluster is up, you can use [dgraph-single.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-single/dgraph-single.yaml) to start a Zero and Alpha.
 
 * From your machine, run the following command to start a StatefulSet that
   creates a Pod with Zero and Alpha running in it.
 
 ```sh
-kubectl create -f https://raw.githubusercontent.com/dgraph-io/dgraph/master/contrib/config/kubernetes/dgraph-single.yaml
+kubectl create -f https://raw.githubusercontent.com/dgraph-io/dgraph/master/contrib/config/kubernetes/dgraph-single/dgraph-single.yaml
 ```
 
 Output:
@@ -989,12 +999,12 @@ ip-172-20-59-116.us-west-2.compute.internal   Ready     node      4m        v1.8
 ip-172-20-61-88.us-west-2.compute.internal    Ready     node      5m        v1.8.4
 ```
 
-Once your Kubernetes cluster is up, you can use [dgraph-ha.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-ha.yaml) to start the cluster.
+Once your Kubernetes cluster is up, you can use [dgraph-ha.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-ha/dgraph-ha.yaml) to start the cluster.
 
 * From your machine, run the following command to start the cluster.
 
 ```sh
-kubectl create -f https://raw.githubusercontent.com/dgraph-io/dgraph/master/contrib/config/kubernetes/dgraph-ha.yaml
+kubectl create -f https://raw.githubusercontent.com/dgraph-io/dgraph/master/contrib/config/kubernetes/dgraph-ha/dgraph-ha.yaml
 ```
 
 Output:
@@ -1201,14 +1211,14 @@ Containers](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/)
 to copy the data to the pod volume before the Alpha process runs.
 
 See the `initContainers` configuration in
-[dgraph-ha.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-ha.yaml)
+[dgraph-ha.yaml](https://github.com/dgraph-io/dgraph/blob/master/contrib/config/kubernetes/dgraph-ha/dgraph-ha.yaml)
 to learn more.
 
-## More about Dgraph
+## More about Dgraph Alpha
 
 On its HTTP port, a Dgraph Alpha exposes a number of admin endpoints.
 
-* `/health` returns HTTP status code 200 and an "OK" message if the worker is running, HTTP 503 otherwise.
+* `/health` returns HTTP status code 200 if the worker is running, HTTP 503 otherwise.
 * `/admin/shutdown` initiates a proper [shutdown]({{< relref "#shutdown">}}) of the Alpha.
 * `/admin/export` initiates a data [export]({{< relref "#export">}}).
 
@@ -1229,7 +1239,7 @@ Options present for `dgraph zero` can be seen by running `dgraph zero --help`.
 * When a new Alpha joins the cluster, it is assigned a group based on the replication factor. If the replication factor is 1 then each Alpha node will serve different group. If replication factor is 2 and you launch 4 Alphas, then first two Alphas would serve group 1 and next two machines would serve group 2.
 * Zero also monitors the space occupied by predicates in each group and moves them around to rebalance the cluster.
 
-Like Alpha, Zero also exposes HTTP on 6080 (+ any `--port_offset`). You can query it
+Like Alpha, Zero also exposes HTTP on 6080 (+ any `--port_offset`). You can query (**GET** request) it
 to see useful information, like the following:
 
 * `/state` Information about the nodes that are part of the cluster. Also contains information about
@@ -1253,6 +1263,13 @@ You should not use the same `idx` of a node that was removed earlier.
 
 * `/moveTablet?tablet=name&group=2` This endpoint can be used to move a tablet to a group. Zero
   already does shard rebalancing every 8 mins, this endpoint can be used to force move a tablet.
+
+
+These are the **POST** endpoints available:
+
+* `/enterpriseLicense` Use endpoint to apply an enterprise license to the cluster by supplying it
+as part of the body.
+
 
 
 ## TLS configuration
@@ -1430,7 +1447,7 @@ There are two different tools that can be used for fast data loading:
 - `dgraph bulk` runs the Dgraph Bulk Loader
 
 {{% notice "note" %}} Both tools only accept [RDF N-Quad/Triple
-data](https://www.w3.org/TR/n-quads/) in plain or gzipped format. Data
+data](https://www.w3.org/TR/n-quads/) or JSON in plain or gzipped format. Data
 in other formats must be converted.{{% /notice %}}
 
 ### Live Loader
@@ -1735,38 +1752,6 @@ operating system and how much is actively in use.
  `dgraph_memory_inuse_bytes`      | Total memory usage in bytes (sum of heap usage and stack usage).
  `dgraph_memory_proc_bytes`       | Total memory usage in bytes of the Dgraph process. On Linux/macOS, this metric is equivalent to resident set size. On Windows, this metric is equivalent to [Go's runtime.ReadMemStats](https://golang.org/pkg/runtime/#ReadMemStats).
 
-### LRU Cache Metrics
-
-The LRU cache metrics let you track on how well the posting list cache is being used.
-
-You can track `dgraph_lru_capacity_bytes`, `dgraph_lru_evicted_total`, and `dgraph_max_list_bytes`
-(see the [Data Metrics]({{< relref "#data-metrics" >}})) to determine if the cache size should be
-adjusted. A high number of evictions can indicate a large posting list that repeatedly is inserted
-and evicted from the cache due to insufficient sizing. The LRU cache size can be tuned with the option
-`--lru_mb`.
-
- Metrics                     | Description
- -------                     | -----------
- `dgraph_lru_hits_total`     | Total number of cache hits for posting lists in Dgraph.
- `dgraph_lru_miss_total`     | Total number of cache misses for posting lists in Dgraph.
- `dgraph_lru_race_total`     | Total number of cache races when getting posting lists in Dgraph.
- `dgraph_lru_evicted_total`  | Total number of posting lists evicted from LRU cache.
- `dgraph_lru_capacity_bytes` | Current size of the LRU cache. The max value should be close to the size specified by `--lru_mb`.
- `dgraph_lru_keys_total`     | Total number of keys in the LRU cache.
- `dgraph_lru_size_bytes`     | Size in bytes of the LRU cache.
-
-### Data Metrics
-
-The data metrics let you track the [posting list]({{< ref "/design-concepts/index.md#posting-list"
->}}) store.
-
- Metrics                          | Description
- -------                          | -----------
- `dgraph_max_list_bytes`          | Max posting list size in bytes.
- `dgraph_max_list_length`         | The largest number of postings stored in a posting list seen so far.
- `dgraph_posting_writes_total`    | Total number of posting list writes to disk.
- `dgraph_read_bytes_total`        | Total bytes read from Dgraph.
-
 ### Activity Metrics
 
 The activity metrics let you track the mutations, queries, and proposals of an Dgraph instance.
@@ -1796,13 +1781,6 @@ Go's built-in metrics may also be useful to measure for memory usage and garbage
  `go_memstats_gc_cpu_fraction`  | The fraction of this program's available CPU time used by the GC since the program started.
  `go_memstats_heap_idle_bytes`  | Number of heap bytes waiting to be used.
  `go_memstats_heap_inuse_bytes` | Number of heap bytes that are in use.
-
-### Unused Metrics
-
- Metrics                          | Description
- -------                          | -----------
- `dgraph_dirtymap_keys_total`     | Unused.
- `dgraph_posting_reads_total`     | Unused.
 
 ## Tracing
 
@@ -1838,6 +1816,29 @@ dgraph alpha --whitelist 172.17.0.0:172.20.0.0,192.168.1.1 --lru_mb <one-third R
 ```
 This would allow admin operations from hosts with IP between `172.17.0.0` and `172.20.0.0` along with
 the server which has IP address as `192.168.1.1`.
+
+### Restrict Mutation Operations
+
+By default, you can perform mutation operations for any predicate.
+If the predicate in mutation doesn't exist in the schema,
+the predicate gets added to the schema with an appropriate
+[Dgraph Type](https://docs.dgraph.io/master/query-language/#schema-types).
+
+You can use `--mutations disallow` to disable all mutations,
+which is set to `allow` by default.
+
+```sh
+dgraph alpha --mutations disallow
+```
+
+Enforce a strict schema by setting `--mutations strict`.
+This mode allows mutations only on predicates already in the schema.
+Before performing a mutation on a predicate that doesn't exist in the schema,
+you need to perform an alter operation with that predicate and its schema type.
+
+```sh
+dgraph alpha --mutations strict
+```
 
 ### Secure Alter Operations
 
@@ -1887,13 +1888,28 @@ can be initiated using the `--whitelist` flag on `dgraph alpha`.
 
 This also works from a browser, provided the HTTP GET is being run from the same server where the Dgraph alpha instance is running.
 
+This triggers an export for all Alpha groups of the cluster. The data is exported from the following Dgraph instances:
 
-{{% notice "note" %}}An export file would be created on only the server which is the leader for a group
-and not on followers.{{% /notice %}}
+1. For the Alpha instance that receives the GET request, the group's export data is stored with this Alpha.
+2. For every other group, its group's export data is stored with the Alpha leader of that group. 
 
-This triggers an export of all the groups spread across the entire cluster. Each Alpha leader for a group writes output as a gzipped RDF file to the export directory specified on startup by `--export`. If any of the groups fail, the entire export process is considered failed and an error is returned.
+It is up to the user to retrieve the right export files from the Alphas in the
+cluster. Dgraph does not copy all files to the Alpha that initiated the export.
+The user must also ensure that there is sufficient space on disk to store the
+export.
 
-{{% notice "note" %}}It is up to the user to retrieve the right export files from the Alphas in the cluster. Dgraph does not copy files to the Alpha that initiated the export.{{% /notice %}}
+Each Alpha leader for a group writes output as a gzipped file to the export
+directory specified via the `--export` flag (defaults to a directory called `"export"`). If any of the groups fail, the
+entire export process is considered failed and an error is returned.
+
+The data is exported in RDF format by default. A different output format may be specified with the
+`format` URL parameter. For example:
+
+```sh
+$ curl 'localhost:8080/admin/export?format=json'
+```
+
+Currently, "rdf" and "json" are the only formats supported.
 
 ### Shutdown Database
 

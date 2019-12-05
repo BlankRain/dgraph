@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// This binary would retrieve a value for UID=0x01, and increment it by 1. If
-// successful, it would print out the incremented value. It assumes that it has
+// Package counter builds a tool that retrieves a value for UID=0x01, and increments
+// it by 1. If successful, it prints out the incremented value. It assumes that it has
 // access to UID=0x01, and that `val` predicate is of type int.
 package counter
 
@@ -23,16 +23,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/dgraph-io/dgraph/x"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.opencensus.io/trace"
 )
 
+// Increment is the sub-command invoked when calling "dgraph increment".
 var Increment x.SubCommand
 
 func init() {
@@ -48,6 +50,7 @@ func init() {
 	flag := Increment.Cmd.Flags()
 	flag.String("alpha", "localhost:9080", "Address of Dgraph Alpha.")
 	flag.Int("num", 1, "How many times to run.")
+	flag.Int("retries", 10, "How many times to retry setting up the connection.")
 	flag.Duration("wait", 0*time.Second, "How long to wait.")
 	flag.String("user", "", "Username if login is required.")
 	flag.String("password", "", "Password of the user.")
@@ -57,27 +60,34 @@ func init() {
 		"Read-only. Read the counter value without updating it.")
 	flag.Bool("be", false,
 		"Best-effort. Read counter value without retrieving timestamp from Zero.")
+	flag.String("jaeger.collector", "", "Send opencensus traces to Jaeger.")
 	// TLS configuration
 	x.RegisterClientTLSFlags(flag)
 }
 
+// Counter stores information about the value being incremented by this tool.
 type Counter struct {
 	Uid string `json:"uid"`
 	Val int    `json:"val"`
 
-	startTs uint64 // Only used for internal testing.
+	startTs  uint64 // Only used for internal testing.
+	qLatency time.Duration
+	mLatency time.Duration
 }
 
-func queryCounter(txn *dgo.Txn, pred string) (Counter, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func queryCounter(ctx context.Context, txn *dgo.Txn, pred string) (Counter, error) {
+	span := trace.FromContext(ctx)
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var counter Counter
 	query := fmt.Sprintf("{ q(func: has(%s)) { uid, val: %s }}", pred, pred)
 	resp, err := txn.Query(ctx, query)
 	if err != nil {
-		return counter, fmt.Errorf("Query error: %v", err)
+		return counter, errors.Wrapf(err, "while doing query")
 	}
+
 	m := make(map[string][]Counter)
 	if err := json.Unmarshal(resp.Json, &m); err != nil {
 		return counter, err
@@ -89,7 +99,9 @@ func queryCounter(txn *dgo.Txn, pred string) (Counter, error) {
 	} else {
 		panic(fmt.Sprintf("Invalid response: %q", resp.Json))
 	}
+	span.Annotatef(nil, "Found counter: %+v", counter)
 	counter.startTs = resp.GetTxn().GetStartTs()
+	counter.qLatency = time.Duration(resp.Latency.GetTotalNs()).Round(time.Millisecond)
 	return counter, nil
 }
 
@@ -107,9 +119,16 @@ func process(dg *dgo.Dgraph, conf *viper.Viper) (Counter, error) {
 	default:
 		txn = dg.NewTxn()
 	}
-	defer txn.Discard(nil)
+	defer func() {
+		if err := txn.Discard(context.Background()); err != nil {
+			fmt.Printf("Discarding transaction failed: %+v\n", err)
+		}
+	}()
 
-	counter, err := queryCounter(txn, pred)
+	ctx, span := trace.StartSpan(context.Background(), "Counter")
+	defer span.End()
+
+	counter, err := queryCounter(ctx, txn, pred)
 	if err != nil {
 		return Counter{}, err
 	}
@@ -119,46 +138,52 @@ func process(dg *dgo.Dgraph, conf *viper.Viper) (Counter, error) {
 
 	counter.Val++
 	var mu api.Mutation
+	mu.CommitNow = true
 	if len(counter.Uid) == 0 {
 		counter.Uid = "_:new"
 	}
 	mu.SetNquads = []byte(fmt.Sprintf(`<%s> <%s> "%d"^^<xs:int> .`, counter.Uid, pred, counter.Val))
 
 	// Don't put any timeout for mutation.
-	_, err = txn.Mutate(context.Background(), &mu)
+	resp, err := txn.Mutate(ctx, &mu)
 	if err != nil {
 		return Counter{}, err
 	}
-	return counter, txn.Commit(context.Background())
+
+	counter.mLatency = time.Duration(resp.Latency.GetTotalNs()).Round(time.Millisecond)
+	return counter, nil
 }
 
 func run(conf *viper.Viper) {
-	alpha := conf.GetString("alpha")
+	trace.ApplyConfig(trace.Config{
+		DefaultSampler:             trace.AlwaysSample(),
+		MaxAnnotationEventsPerSpan: 256,
+	})
+	x.RegisterExporters(conf, "dgraph.increment")
+
+	startTime := time.Now()
+	defer func() { fmt.Println("Total:", time.Since(startTime).Round(time.Millisecond)) }()
+
 	waitDur := conf.GetDuration("wait")
 	num := conf.GetInt("num")
+	format := "0102 03:04:05.999"
 
-	tlsCfg, err := x.LoadClientTLSConfig(conf)
-	x.CheckfNoTrace(err)
-
-	conn, err := x.SetupConnection(alpha, tlsCfg, false)
-	if err != nil {
-		log.Fatal(err)
-	}
-	dc := api.NewDgraphClient(conn)
-	dg := dgo.NewDgraphClient(dc)
-	if user := conf.GetString("user"); len(user) > 0 {
-		x.CheckfNoTrace(dg.Login(context.Background(), user, conf.GetString("password")))
-	}
+	dg, closeFunc := x.GetDgraphClient(Increment.Conf, true)
+	defer closeFunc()
 
 	for num > 0 {
+		txnStart := time.Now() // Start time of transaction
 		cnt, err := process(dg, conf)
-		now := time.Now().UTC().Format("0102 03:04:05.999")
+		now := time.Now().UTC().Format(format)
 		if err != nil {
 			fmt.Printf("%-17s While trying to process counter: %v. Retrying...\n", now, err)
 			time.Sleep(time.Second)
 			continue
 		}
-		fmt.Printf("%-17s Counter VAL: %d   [ Ts: %d ]\n", now, cnt.Val, cnt.startTs)
+		serverLat := cnt.qLatency + cnt.mLatency
+		clientLat := time.Since(txnStart).Round(time.Millisecond)
+		fmt.Printf("%-17s Counter VAL: %d   [ Ts: %d ] Latency: Q %s M %s S %s C %s D %s\n", now, cnt.Val,
+			cnt.startTs, cnt.qLatency, cnt.mLatency, serverLat, clientLat, clientLat-serverLat)
 		num--
 		time.Sleep(waitDur)
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/dgraph-io/dgraph/lex"
 	"github.com/dgraph-io/dgraph/types"
 	"github.com/dgraph-io/dgraph/x"
+	"github.com/pkg/errors"
 )
 
 type mathTreeStack struct{ a []*MathTree }
@@ -41,7 +42,7 @@ func (s *mathTreeStack) popAssert() *MathTree {
 
 func (s *mathTreeStack) pop() (*MathTree, error) {
 	if s.empty() {
-		return nil, x.Errorf("Empty stack")
+		return nil, errors.Errorf("Empty stack")
 	}
 	last := s.a[len(s.a)-1]
 	s.a = s.a[:len(s.a)-1]
@@ -53,6 +54,7 @@ func (s *mathTreeStack) peek() *MathTree {
 	return s.a[len(s.a)-1]
 }
 
+// MathTree represents math operations in tree form for evaluation.
 type MathTree struct {
 	Fn    string
 	Var   string
@@ -75,46 +77,59 @@ func isTernary(f string) bool {
 }
 
 func isZero(f string, rval types.Val) bool {
-	if rval.Tid != types.FloatID {
+	if rval.Tid == types.FloatID {
+		g, ok := rval.Value.(float64)
+		if !ok {
+			return false
+		}
+		switch f {
+		case "floor":
+			return g >= 0 && g < 1.0
+		case "/", "%", "ceil", "sqrt", "u-":
+			return g == 0
+		case "ln":
+			return g == 1
+		}
+		return false
+	} else if rval.Tid == types.IntID {
+		g, ok := rval.Value.(int64)
+		if !ok {
+			return false
+		}
+		switch f {
+		case "floor", "/", "%", "ceil", "sqrt", "u-":
+			return g == 0
+		case "ln":
+			return g == 1
+		}
 		return false
 	}
-	g, ok := rval.Value.(float64)
-	if !ok {
-		return false
-	}
-	switch f {
-	case "floor":
-		return g >= 0 && g < 1.0
-	case "/", "%", "ceil", "sqrt", "u-":
-		return g == 0
-	case "ln":
-		return g == 1
-	}
+
 	return false
 }
 
 func evalMathStack(opStack, valueStack *mathTreeStack) error {
 	topOp, err := opStack.pop()
 	if err != nil {
-		return x.Errorf("Invalid Math expression")
+		return errors.Errorf("Invalid Math expression")
 	}
 	if isUnary(topOp.Fn) {
 		// Since "not" is a unary operator, just pop one value.
 		topVal, err := valueStack.pop()
 		if err != nil {
-			return x.Errorf("Invalid math statement. Expected 1 operands")
+			return errors.Errorf("Invalid math statement. Expected 1 operands")
 		}
 		if opStack.size() > 1 {
 			peek := opStack.peek().Fn
 			if (peek == "/" || peek == "%") && isZero(topOp.Fn, topVal.Const) {
-				return x.Errorf("Division by zero")
+				return errors.Errorf("Division by zero")
 			}
 		}
 		topOp.Child = []*MathTree{topVal}
 
 	} else if isTernary(topOp.Fn) {
 		if valueStack.size() < 3 {
-			return x.Errorf("Invalid Math expression. Expected 3 operands")
+			return errors.Errorf("Invalid Math expression. Expected 3 operands")
 		}
 		topVal1 := valueStack.popAssert()
 		topVal2 := valueStack.popAssert()
@@ -123,10 +138,10 @@ func evalMathStack(opStack, valueStack *mathTreeStack) error {
 
 	} else {
 		if valueStack.size() < 2 {
-			return x.Errorf("Invalid Math expression. Expected 2 operands")
+			return errors.Errorf("Invalid Math expression. Expected 2 operands")
 		}
 		if isZero(topOp.Fn, valueStack.peek().Const) {
-			return x.Errorf("Division by zero.")
+			return errors.Errorf("Division by zero.")
 		}
 		topVal1 := valueStack.popAssert()
 		topVal2 := valueStack.popAssert()
@@ -154,7 +169,7 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 		it.Next()
 		item := it.Item()
 		if item.Typ != itemLeftRound {
-			return nil, false, x.Errorf("Expected ( after math")
+			return nil, false, errors.Errorf("Expected ( after math")
 		}
 	}
 
@@ -216,7 +231,7 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 			if peekIt[0].Typ == itemLeftRound {
 				again := false
 				if !isMathFunc(item.Val) {
-					return nil, false, x.Errorf("Unknown math function: %v", item.Val)
+					return nil, false, errors.Errorf("Unknown math function: %v", item.Val)
 				}
 				var child *MathTree
 				for {
@@ -231,15 +246,23 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 				}
 				continue
 			}
-			// Try to parse it as a constant.
+			// We will try to parse the constant as an Int first, if that fails we move to float
 			child := &MathTree{}
-			v, err := strconv.ParseFloat(item.Val, 64)
+			i, err := strconv.ParseInt(item.Val, 10, 64)
 			if err != nil {
-				child.Var = item.Val
+				v, err := strconv.ParseFloat(item.Val, 64)
+				if err != nil {
+					child.Var = item.Val
+				} else {
+					child.Const = types.Val{
+						Tid:   types.FloatID,
+						Value: v,
+					}
+				}
 			} else {
 				child.Const = types.Val{
-					Tid:   types.FloatID,
-					Value: v,
+					Tid:   types.IntID,
+					Value: i,
 				}
 			}
 			valueStack.push(child)
@@ -259,13 +282,13 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 			}
 			_, err := opStack.pop() // Pop away the (.
 			if err != nil {
-				return nil, false, x.Errorf("Invalid Math expression")
+				return nil, false, errors.Errorf("Invalid Math expression")
 			}
 			if !opStack.empty() {
-				return nil, false, x.Errorf("Invalid math expression.")
+				return nil, false, errors.Errorf("Invalid math expression.")
 			}
 			if valueStack.size() != 1 {
-				return nil, false, x.Errorf("Expected one item in value stack, but got %d",
+				return nil, false, errors.Errorf("Expected one item in value stack, but got %d",
 					valueStack.size())
 			}
 			res, err := valueStack.pop()
@@ -286,14 +309,14 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 			}
 			_, err := opStack.pop() // Pop away the (.
 			if err != nil {
-				return nil, false, x.Errorf("Invalid Math expression")
+				return nil, false, errors.Errorf("Invalid Math expression")
 			}
 			if opStack.empty() {
 				// The parentheses are balanced out. Let's break.
 				break
 			}
 		} else {
-			return nil, false, x.Errorf("Unexpected item while parsing math expression: %v", item)
+			return nil, false, errors.Errorf("Unexpected item while parsing math expression: %v", item)
 		}
 	}
 
@@ -307,11 +330,11 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 	if valueStack.empty() {
 		// This happens when we have math(). We can either return an error or
 		// ignore. Currently, let's just ignore and pretend there is no expression.
-		return nil, false, x.Errorf("Empty () not allowed in math block.")
+		return nil, false, errors.Errorf("Empty () not allowed in math block.")
 	}
 
 	if valueStack.size() != 1 {
-		return nil, false, x.Errorf("Expected one item in value stack, but got %d",
+		return nil, false, errors.Errorf("Expected one item in value stack, but got %d",
 			valueStack.size())
 	}
 	res, err := valueStack.pop()
@@ -319,6 +342,7 @@ func parseMathFunc(it *lex.ItemIterator, again bool) (*MathTree, bool, error) {
 }
 
 // debugString converts mathTree to a string. Good for testing, debugging.
+// nolint: unused
 func (t *MathTree) debugString() string {
 	buf := bytes.NewBuffer(make([]byte, 0, 20))
 	t.stringHelper(buf)
@@ -326,32 +350,40 @@ func (t *MathTree) debugString() string {
 }
 
 // stringHelper does simple DFS to convert MathTree to string.
+// nolint: unused
 func (t *MathTree) stringHelper(buf *bytes.Buffer) {
 	x.AssertTruef(t != nil, "Nil Math tree")
 	if t.Var != "" {
 		// Leaf node.
-		buf.WriteString(t.Var)
+		x.Check2(buf.WriteString(t.Var))
 		return
 	}
 	if t.Const.Value != nil {
 		// Leaf node.
-		buf.WriteString(strconv.FormatFloat(t.Const.Value.(float64), 'E', -1, 64))
+		var leafStr int
+		var err error
+		if t.Const.Tid == types.FloatID {
+			leafStr, err = buf.WriteString(strconv.FormatFloat(t.Const.Value.(float64), 'E', -1, 64))
+		} else if t.Const.Tid == types.IntID {
+			leafStr, err = buf.WriteString(strconv.FormatInt(t.Const.Value.(int64), 10))
+		}
+		x.Check2(leafStr, err)
 		return
 	}
 	// Non-leaf node.
-	buf.WriteRune('(')
+	x.Check2(buf.WriteRune('('))
 	switch t.Fn {
 	case "+", "-", "/", "*", "%", "exp", "ln", "cond", "min",
 		"sqrt", "max", "<", ">", "<=", ">=", "==", "!=", "u-",
 		"logbase", "pow":
-		buf.WriteString(t.Fn)
+		x.Check2(buf.WriteString(t.Fn))
 	default:
 		x.Fatalf("Unknown operator: %q", t.Fn)
 	}
 
 	for _, c := range t.Child {
-		buf.WriteRune(' ')
+		x.Check2(buf.WriteRune(' '))
 		c.stringHelper(buf)
 	}
-	buf.WriteRune(')')
+	x.Check2(buf.WriteRune(')'))
 }

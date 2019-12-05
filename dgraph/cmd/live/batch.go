@@ -18,7 +18,6 @@ package live
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -30,17 +29,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
-	"github.com/dgraph-io/dgo/y"
-	"github.com/dgraph-io/dgraph/protos/pb"
+	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"github.com/dgraph-io/dgraph/dgraph/cmd/zero"
 	"github.com/dgraph-io/dgraph/x"
 	"github.com/dgraph-io/dgraph/xidmap"
-)
-
-var (
-	ErrMaxTries = errors.New("Max retries exceeded for request while doing batch mutations")
+	"github.com/dustin/go-humanize/english"
 )
 
 // batchMutationOptions sets the clients batch mode to Pending number of buffers each of Size.
@@ -78,32 +73,9 @@ type loader struct {
 	// To get time elapsed
 	start time.Time
 
+	reqNum   uint64
 	reqs     chan api.Mutation
 	zeroconn *grpc.ClientConn
-}
-
-type uidProvider struct {
-	zero pb.ZeroClient
-	ctx  context.Context
-}
-
-func (p *uidProvider) ReserveUidRange() (uint64, uint64, error) {
-	factor := time.Second
-	for {
-		assignedIds, err := p.zero.AssignUids(context.Background(), &pb.Num{Val: 1000})
-		if err == nil {
-			return assignedIds.StartId, assignedIds.EndId, nil
-		}
-		fmt.Printf("Error while getting lease %v\n", err)
-		select {
-		case <-time.After(factor):
-		case <-p.ctx.Done():
-			return 0, 0, p.ctx.Err()
-		}
-		if factor < 256*time.Second {
-			factor *= 2
-		}
-	}
 }
 
 // Counter keeps a track of various parameters about a batch mutation. Running totals are printed
@@ -125,34 +97,44 @@ type Counter struct {
 // server expects TLS and our certificate does not match or the host name is not verified. When
 // the node certificate is created the name much match the request host name. e.g., localhost not
 // 127.0.0.1.
-func handleError(err error) {
+func handleError(err error, reqNum uint64, isRetry bool) {
 	s := status.Convert(err)
 	switch {
 	case s.Code() == codes.Internal, s.Code() == codes.Unavailable:
 		x.Fatalf(s.Message())
 	case strings.Contains(s.Message(), "x509"):
 		x.Fatalf(s.Message())
+	case s.Code() == codes.Aborted:
+		if !isRetry && opt.verbose {
+			fmt.Printf("Transaction #%d aborted. Will retry in background.\n", reqNum)
+		}
 	case strings.Contains(s.Message(), "Server overloaded."):
 		dur := time.Duration(1+rand.Intn(10)) * time.Minute
-		fmt.Printf("Server is overloaded. Will retry after %s.", dur.Round(time.Minute))
+		fmt.Printf("Server is overloaded. Will retry after %s.\n", dur.Round(time.Minute))
 		time.Sleep(dur)
-	case err != y.ErrAborted && err != y.ErrConflict:
-		fmt.Printf("Error while mutating: %v\n", s.Message())
+	case err != zero.ErrConflict && err != dgo.ErrAborted:
+		fmt.Printf("Error while mutating: %v s.Code %v\n", s.Message(), s.Code())
 	}
 }
 
-func (l *loader) infinitelyRetry(req api.Mutation) {
+func (l *loader) infinitelyRetry(req api.Mutation, reqNum uint64) {
 	defer l.retryRequestsWg.Done()
+	nretries := 1
 	for i := time.Millisecond; ; i *= 2 {
 		txn := l.dc.NewTxn()
 		req.CommitNow = true
 		_, err := txn.Mutate(l.opts.Ctx, &req)
 		if err == nil {
+			if opt.verbose {
+				fmt.Printf("Transaction #%d succeeded after %s.\n",
+					reqNum, english.Plural(nretries, "retry", "retries"))
+			}
 			atomic.AddUint64(&l.nquads, uint64(len(req.Set)))
 			atomic.AddUint64(&l.txns, 1)
 			return
 		}
-		handleError(err)
+		nretries++
+		handleError(err, reqNum, true)
 		atomic.AddUint64(&l.aborts, 1)
 		if i >= 10*time.Second {
 			i = 10 * time.Second
@@ -161,7 +143,7 @@ func (l *loader) infinitelyRetry(req api.Mutation) {
 	}
 }
 
-func (l *loader) request(req api.Mutation) {
+func (l *loader) request(req api.Mutation, reqNum uint64) {
 	txn := l.dc.NewTxn()
 	req.CommitNow = true
 	_, err := txn.Mutate(l.opts.Ctx, &req)
@@ -171,10 +153,10 @@ func (l *loader) request(req api.Mutation) {
 		atomic.AddUint64(&l.txns, 1)
 		return
 	}
-	handleError(err)
+	handleError(err, reqNum, false)
 	atomic.AddUint64(&l.aborts, 1)
 	l.retryRequestsWg.Add(1)
-	go l.infinitelyRetry(req)
+	go l.infinitelyRetry(req, reqNum)
 }
 
 // makeRequests can receive requests from batchNquads or directly from BatchSetWithMark.
@@ -183,7 +165,8 @@ func (l *loader) request(req api.Mutation) {
 func (l *loader) makeRequests() {
 	defer l.requestsWg.Done()
 	for req := range l.reqs {
-		l.request(req)
+		reqNum := atomic.AddUint64(&l.reqNum, 1)
+		l.request(req, reqNum)
 	}
 }
 
@@ -211,11 +194,5 @@ func (l *loader) Counter() Counter {
 		TxnsDone: atomic.LoadUint64(&l.txns),
 		Elapsed:  time.Since(l.start),
 		Aborts:   atomic.LoadUint64(&l.aborts),
-	}
-}
-
-func (l *loader) stopTickers() {
-	if l.ticker != nil {
-		l.ticker.Stop()
 	}
 }

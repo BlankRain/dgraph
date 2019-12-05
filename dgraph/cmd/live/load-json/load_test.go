@@ -19,20 +19,22 @@ package live
 import (
 	"context"
 	"io/ioutil"
+	"log"
 	"os"
 	"path"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/dgraph-io/dgo"
+	"github.com/dgraph-io/dgo/v2"
 	"github.com/stretchr/testify/require"
 
+	"github.com/dgraph-io/dgraph/testutil"
 	"github.com/dgraph-io/dgraph/x"
-	"github.com/dgraph-io/dgraph/z"
 )
 
-var alphaService = z.SockAddr
+var alphaService = testutil.SockAddr
+var zeroService = testutil.SockAddrZero
 
 var (
 	testDataDir string
@@ -47,19 +49,22 @@ func checkLoadedData(t *testing.T) {
 			q(func: anyofterms(name, "Homer")) {
 				name
 				age
-				role
+				role @facets(gender,generation)
+				role@es
 			}
 		}
 	`)
 	require.NoError(t, err)
-	z.CompareJSON(t, `
+	testutil.CompareJSON(t, `
 		{
-		    "q": [
+			"q": [
 					{
 					"name": "Homer",
 					"age": 38,
-					"role": "father"
-			    }
+					"role": "father",
+					"role@es": "padre",
+					"role|gender": "male"
+				}
 			]
 		}
 	`, string(resp.GetJson()))
@@ -68,56 +73,73 @@ func checkLoadedData(t *testing.T) {
 		{
 			q(func: anyofterms(name, "Maggie")) {
 				name
-				role
+				role @facets(gender,generation)
+				role@es
 				carries
 			}
 		}
 	`)
 	require.NoError(t, err)
-	z.CompareJSON(t, `
+	testutil.CompareJSON(t, `
 		{
-		    "q": [
+			"q": [
 				{
 					"name": "Maggie",
 					"role": "daughter",
-					"carries": "pacifier"
-			    }
+					"role@es": "hija",
+					"carries": "pacifier",
+					"role|gender": "female",
+					"role|generation": 3
+				}
 			]
 		}
 	`, string(resp.GetJson()))
 }
 
+func TestLiveLoadJSONFileEmpty(t *testing.T) {
+	testutil.DropAll(t, dg)
+
+	pipeline := [][]string{
+		{"echo", "[]"},
+		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
+			"--schema", testDataDir + "/family.schema", "--files", "/dev/stdin",
+			"--alpha", alphaService, "--zero", zeroService},
+	}
+	err := testutil.Pipeline(pipeline)
+	require.NoError(t, err, "live loading JSON file ran successfully")
+}
+
 func TestLiveLoadJSONFile(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
 
 	checkLoadedData(t)
 }
 
 func TestLiveLoadJSONCompressedStream(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	pipeline := [][]string{
 		{"gzip", "-c", testDataDir + "/family.json"},
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
 			"--schema", testDataDir + "/family.schema", "--files", "/dev/stdin",
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON stream exited with error")
 
 	checkLoadedData(t)
 }
 
 func TestLiveLoadJSONMultipleFiles(t *testing.T) {
-	z.DropAll(t, dg)
+	testutil.DropAll(t, dg)
 
 	files := []string{
 		testDataDir + "/family1.json",
@@ -129,9 +151,9 @@ func TestLiveLoadJSONMultipleFiles(t *testing.T) {
 	pipeline := [][]string{
 		{os.ExpandEnv("$GOPATH/bin/dgraph"), "live",
 			"--schema", testDataDir + "/family.schema", "--files", fileList,
-			"--alpha", alphaService},
+			"--alpha", alphaService, "--zero", zeroService},
 	}
-	err := z.Pipeline(pipeline)
+	err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading multiple JSON files exited with error")
 
 	checkLoadedData(t)
@@ -141,7 +163,11 @@ func TestMain(m *testing.M) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	testDataDir = path.Dir(thisFile)
 
-	dg = z.DgraphClientWithGroot(z.SockAddr)
+	var err error
+	dg, err = testutil.DgraphClientWithGroot(testutil.SockAddr)
+	if err != nil {
+		log.Fatalf("Error while getting a dgraph client: %v", err)
+	}
 
 	// Try to create any files in a dedicated temp directory that gets cleaned up
 	// instead of all over /tmp or the working directory.

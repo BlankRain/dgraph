@@ -23,11 +23,12 @@ import (
 	"io"
 	"log"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/badger/options"
+	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger/v2/options"
 	"github.com/dgraph-io/dgraph/codec"
 	"github.com/dgraph-io/dgraph/posting"
 	"github.com/dgraph-io/dgraph/protos/pb"
@@ -37,6 +38,7 @@ import (
 )
 
 var (
+	// Debug is the sub-command invoked when calling "dgraph debug"
 	Debug x.SubCommand
 	opt   flagOptions
 )
@@ -53,6 +55,11 @@ type flagOptions struct {
 	readTs        uint64
 	sizeHistogram bool
 	noKeys        bool
+
+	// Options related to the WAL.
+	wdir           string
+	wtruncateUntil uint64
+	wsetSnapshot   string
 }
 
 func init() {
@@ -78,6 +85,13 @@ func init() {
 	flag.StringVarP(&opt.pdir, "postings", "p", "", "Directory where posting lists are stored.")
 	flag.BoolVar(&opt.sizeHistogram, "histogram", false,
 		"Show a histogram of the key and value sizes.")
+
+	flag.StringVarP(&opt.wdir, "wal", "w", "", "Directory where Raft write-ahead logs are stored.")
+	flag.Uint64VarP(&opt.wtruncateUntil, "truncate", "t", 0,
+		"Remove data from Raft entries until but not including this index.")
+	flag.StringVarP(&opt.wsetSnapshot, "snap", "s", "",
+		"Set snapshot term,index,readts to this. Value must be comma-separated list containing"+
+			" the value for these vars in that order.")
 }
 
 func toInt(o *pb.Posting) int {
@@ -105,7 +119,8 @@ func uidToVal(itr *badger.Iterator, prefix string) map[uint64]int {
 			continue
 		}
 		lastKey = append(lastKey[:0], item.Key()...)
-		pk := x.Parse(item.Key())
+		pk, err := x.Parse(item.Key())
+		x.Check(err)
 		if !pk.IsData() || !strings.HasPrefix(pk.Attr, prefix) {
 			continue
 		}
@@ -241,8 +256,9 @@ func showAllPostingsAt(db *badger.DB, readTs uint64) {
 			continue
 		}
 
-		pk := x.Parse(item.Key())
-		if !pk.IsData() || pk.Attr == "_predicate_" {
+		pk, err := x.Parse(item.Key())
+		x.Check(err)
+		if !pk.IsData() {
 			continue
 		}
 
@@ -333,7 +349,8 @@ func jepsen(db *badger.DB) {
 
 func history(lookup []byte, itr *badger.Iterator) {
 	var buf bytes.Buffer
-	pk := x.Parse(lookup)
+	pk, err := x.Parse(lookup)
+	x.Check(err)
 	fmt.Fprintf(&buf, "==> key: %x. PK: %+v\n", lookup, pk)
 	for ; itr.Valid(); itr.Next() {
 		item := itr.Item()
@@ -342,25 +359,25 @@ func history(lookup []byte, itr *badger.Iterator) {
 		}
 
 		fmt.Fprintf(&buf, "ts: %d", item.Version())
-		buf.WriteString(" {item}")
+		x.Check2(buf.WriteString(" {item}"))
 		if item.IsDeletedOrExpired() {
-			buf.WriteString("{deleted}")
+			x.Check2(buf.WriteString("{deleted}"))
 		}
 		if item.DiscardEarlierVersions() {
-			buf.WriteString("{discard}")
+			x.Check2(buf.WriteString("{discard}"))
 		}
 		val, err := item.ValueCopy(nil)
 		x.Check(err)
 
 		meta := item.UserMeta()
 		if meta&posting.BitCompletePosting > 0 {
-			buf.WriteString("{complete}")
+			x.Check2(buf.WriteString("{complete}"))
 		}
 		if meta&posting.BitDeltaPosting > 0 {
-			buf.WriteString("{delta}")
+			x.Check2(buf.WriteString("{delta}"))
 		}
 		if meta&posting.BitEmptyPosting > 0 {
-			buf.WriteString("{empty}")
+			x.Check2(buf.WriteString("{empty}"))
 		}
 		fmt.Fprintln(&buf)
 		if meta&posting.BitDeltaPosting > 0 {
@@ -387,7 +404,7 @@ func history(lookup []byte, itr *badger.Iterator) {
 				}
 			}
 		}
-		buf.WriteString("\n")
+		x.Check2(buf.WriteString("\n"))
 	}
 	fmt.Println(buf.String())
 }
@@ -442,7 +459,15 @@ func lookup(db *badger.DB) {
 	}
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, " Key: %x", item.Key())
-	fmt.Fprintf(&buf, " Length: %d\n", pl.Length(math.MaxUint64, 0))
+	fmt.Fprintf(&buf, " Length: %d", pl.Length(math.MaxUint64, 0))
+
+	splits := pl.PartSplits()
+	isMultiPart := len(splits) > 0
+	fmt.Fprintf(&buf, " Is multi-part list? %v", isMultiPart)
+	if isMultiPart {
+		fmt.Fprintf(&buf, " Start UID of parts: %v\n", splits)
+	}
+
 	err = pl.Iterate(math.MaxUint64, 0, func(o *pb.Posting) error {
 		appendPosting(&buf, o)
 		return nil
@@ -471,35 +496,36 @@ func printKeys(db *badger.DB) {
 	var loop int
 	for itr.Seek(prefix); itr.ValidForPrefix(prefix); itr.Next() {
 		item := itr.Item()
-		pk := x.Parse(item.Key())
+		pk, err := x.Parse(item.Key())
+		x.Check(err)
 		var buf bytes.Buffer
 
 		// Don't use a switch case here. Because multiple of these can be true. In particular,
 		// IsSchema can be true alongside IsData.
 		if pk.IsData() {
-			buf.WriteString("{d}")
+			x.Check2(buf.WriteString("{d}"))
 		}
 		if pk.IsIndex() {
-			buf.WriteString("{i}")
+			x.Check2(buf.WriteString("{i}"))
 		}
-		if pk.IsCount() {
-			buf.WriteString("{c}")
+		if pk.IsCountOrCountRev() {
+			x.Check2(buf.WriteString("{c}"))
 		}
 		if pk.IsSchema() {
-			buf.WriteString("{s}")
+			x.Check2(buf.WriteString("{s}"))
 		}
 		if pk.IsReverse() {
-			buf.WriteString("{r}")
+			x.Check2(buf.WriteString("{r}"))
 		}
 		if item.DiscardEarlierVersions() {
-			buf.WriteString(" {v.las}")
+			x.Check2(buf.WriteString(" {v.las}"))
 		} else if item.IsDeletedOrExpired() {
-			buf.WriteString(" {v.not}")
+			x.Check2(buf.WriteString(" {v.not}"))
 		} else {
-			buf.WriteString(" {v.ok}")
+			x.Check2(buf.WriteString(" {v.ok}"))
 		}
 
-		buf.WriteString(" attr: " + pk.Attr)
+		x.Check2(buf.WriteString(" attr: " + pk.Attr))
 		if len(pk.Term) > 0 {
 			fmt.Fprintf(&buf, " term: [%d] %s ", pk.Term[0], pk.Term[1:])
 		}
@@ -530,6 +556,8 @@ func getHistogramBounds(minExponent, maxExponent uint32) []float64 {
 	return bounds
 }
 
+// HistogramData stores the information needed to represent the sizes of the keys and values
+// as a histogram.
 type HistogramData struct {
 	Bounds         []float64
 	Count          int64
@@ -539,7 +567,7 @@ type HistogramData struct {
 	Sum            int64
 }
 
-// Return a new instance of HistogramData with properly initialized fields.
+// NewHistogramData returns a new instance of HistogramData with properly initialized fields.
 func NewHistogramData(bounds []float64) *HistogramData {
 	return &HistogramData{
 		Bounds:         bounds,
@@ -549,8 +577,7 @@ func NewHistogramData(bounds []float64) *HistogramData {
 	}
 }
 
-// Update the Min and Max fields if value is less than or greater than the
-// current values.
+// Update changes the Min and Max fields if value is less than or greater than the current values.
 func (histogram *HistogramData) Update(value int64) {
 	if value > histogram.Max {
 		histogram.Max = value
@@ -576,7 +603,7 @@ func (histogram *HistogramData) Update(value int64) {
 	}
 }
 
-// Print the histogram data in a human-readable format.
+// PrintHistogram prints the histogram data in a human-readable format.
 func (histogram HistogramData) PrintHistogram() {
 	fmt.Printf("Min value: %d\n", histogram.Min)
 	fmt.Printf("Max value: %d\n", histogram.Max)
@@ -649,19 +676,103 @@ func sizeHistogram(db *badger.DB) {
 	valueSizeHistogram.PrintHistogram()
 }
 
-func run() {
-	bopts := badger.DefaultOptions
-	bopts.Dir = opt.pdir
-	bopts.ValueDir = opt.pdir
-	bopts.TableLoadingMode = options.MemoryMap
-	bopts.ReadOnly = opt.readOnly
+func printAlphaProposal(buf *bytes.Buffer, pr pb.Proposal, pending map[uint64]bool) {
+	switch {
+	case pr.Mutations != nil:
+		fmt.Fprintf(buf, " Mutation . StartTs: %d . Edges: %d .",
+			pr.Mutations.StartTs, len(pr.Mutations.Edges))
+		if len(pr.Mutations.Edges) > 0 {
+			pending[pr.Mutations.StartTs] = true
+		} else {
+			fmt.Fprintf(buf, " Mutation: %+v .", pr.Mutations)
+		}
+		fmt.Fprintf(buf, " Pending txns: %d .", len(pending))
+	case len(pr.Kv) > 0:
+		fmt.Fprintf(buf, " KV . Size: %d ", len(pr.Kv))
+	case pr.State != nil:
+		fmt.Fprintf(buf, " State . %+v ", pr.State)
+	case pr.Delta != nil:
+		fmt.Fprintf(buf, " Delta .")
+		sort.Slice(pr.Delta.Txns, func(i, j int) bool {
+			ti := pr.Delta.Txns[i]
+			tj := pr.Delta.Txns[j]
+			return ti.StartTs < tj.StartTs
+		})
+		fmt.Fprintf(buf, " Max: %d .", pr.Delta.GetMaxAssigned())
+		for _, txn := range pr.Delta.Txns {
+			delete(pending, txn.StartTs)
+		}
+		// There could be many thousands of txns within a single delta. We
+		// don't need to print out every single entry, so just show the
+		// first 10.
+		if len(pr.Delta.Txns) >= 10 {
+			fmt.Fprintf(buf, " Num txns: %d .", len(pr.Delta.Txns))
+			pr.Delta.Txns = pr.Delta.Txns[:10]
+		}
+		for _, txn := range pr.Delta.Txns {
+			fmt.Fprintf(buf, " %d → %d .", txn.StartTs, txn.CommitTs)
+		}
+		fmt.Fprintf(buf, " Pending txns: %d .", len(pending))
+	case pr.Snapshot != nil:
+		fmt.Fprintf(buf, " Snapshot . %+v ", pr.Snapshot)
+	}
+}
 
-	x.AssertTruef(len(bopts.Dir) > 0, "No posting dir specified.")
+func printZeroProposal(buf *bytes.Buffer, zpr pb.ZeroProposal) {
+	switch {
+	case len(zpr.SnapshotTs) > 0:
+		fmt.Fprintf(buf, " Snapshot: %+v .", zpr.SnapshotTs)
+	case zpr.Member != nil:
+		fmt.Fprintf(buf, " Member: %+v .", zpr.Member)
+	case zpr.Tablet != nil:
+		fmt.Fprintf(buf, " Tablet: %+v .", zpr.Tablet)
+	case zpr.MaxLeaseId > 0:
+		fmt.Fprintf(buf, " MaxLeaseId: %d .", zpr.MaxLeaseId)
+	case zpr.MaxRaftId > 0:
+		fmt.Fprintf(buf, " MaxRaftId: %d .", zpr.MaxRaftId)
+	case zpr.MaxTxnTs > 0:
+		fmt.Fprintf(buf, " MaxTxnTs: %d .", zpr.MaxTxnTs)
+	case zpr.Txn != nil:
+		txn := zpr.Txn
+		fmt.Fprintf(buf, " Txn %d → %d .", txn.StartTs, txn.CommitTs)
+	default:
+		fmt.Fprintf(buf, " Proposal: %+v .", zpr)
+	}
+}
+
+func run() {
+	dir := opt.pdir
+	isWal := false
+	if len(dir) == 0 {
+		dir = opt.wdir
+		isWal = true
+	}
+	bopts := badger.DefaultOptions(dir).
+		WithTableLoadingMode(options.MemoryMap).
+		WithReadOnly(opt.readOnly)
+
+	x.AssertTruef(len(bopts.Dir) > 0, "No posting or wal dir specified.")
 	fmt.Printf("Opening DB: %s\n", bopts.Dir)
 
-	db, err := badger.OpenManaged(bopts)
+	var db *badger.DB
+	var err error
+	if isWal {
+		db, err = badger.Open(bopts)
+	} else {
+		db, err = badger.OpenManaged(bopts)
+	}
 	x.Check(err)
 	defer db.Close()
+
+	if isWal {
+		if err := handleWal(db); err != nil {
+			fmt.Printf("\nGot error while handling WAL: %v\n", err)
+		}
+		fmt.Println("Done")
+		// WAL can't execute the getMinMax function, so we need to deal with it
+		// here, instead of in the select case below.
+		return
+	}
 
 	min, max := getMinMax(db, opt.readTs)
 	fmt.Printf("Min commit: %d. Max commit: %d, w.r.t %d\n", min, max, opt.readTs)

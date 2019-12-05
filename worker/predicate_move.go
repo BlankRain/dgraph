@@ -22,12 +22,13 @@ import (
 	"strconv"
 
 	"github.com/golang/glog"
+	"github.com/pkg/errors"
 	otrace "go.opencensus.io/trace"
 	"golang.org/x/net/context"
 
-	"github.com/dgraph-io/badger"
-	bpb "github.com/dgraph-io/badger/pb"
-	"github.com/dgraph-io/dgo/protos/api"
+	"github.com/dgraph-io/badger/v2"
+	bpb "github.com/dgraph-io/badger/v2/pb"
+	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/dgraph-io/dgraph/posting"
 	"github.com/dgraph-io/dgraph/protos/pb"
 	"github.com/dgraph-io/dgraph/schema"
@@ -35,9 +36,8 @@ import (
 )
 
 var (
-	errEmptyPredicate = x.Errorf("Predicate not specified")
-	errNotLeader      = x.Errorf("Server is not leader of this group")
-	errUnableToAbort  = x.Errorf("Unable to abort pending transactions")
+	errEmptyPredicate = errors.Errorf("Predicate not specified")
+	errNotLeader      = errors.Errorf("Server is not leader of this group")
 	emptyPayload      = api.Payload{}
 )
 
@@ -48,13 +48,16 @@ func populateKeyValues(ctx context.Context, kvs []*bpb.KV) error {
 		return nil
 	}
 	writer := posting.NewTxnWriter(pstore)
-	if err := writer.Send(&pb.KVS{Kv: kvs}); err != nil {
+	if err := writer.Write(&bpb.KVList{Kv: kvs}); err != nil {
 		return err
 	}
 	if err := writer.Flush(); err != nil {
 		return err
 	}
-	pk := x.Parse(kvs[0].Key)
+	pk, err := x.Parse(kvs[0].Key)
+	if err != nil {
+		return err
+	}
 	return schema.Load(pk.Attr)
 }
 
@@ -63,16 +66,22 @@ func batchAndProposeKeyValues(ctx context.Context, kvs chan *pb.KVS) error {
 	n := groups().Node
 	proposal := &pb.Proposal{}
 	size := 0
-	var pk *x.ParsedKey
+	var pk x.ParsedKey
 
 	for kvBatch := range kvs {
 		for _, kv := range kvBatch.Kv {
-			if pk == nil {
+			if len(pk.Attr) == 0 {
 				// This only happens once.
-				pk = x.Parse(kv.Key)
-				if !pk.IsSchema() {
-					return x.Errorf("Expecting first key to be schema key: %+v", kv)
+				var err error
+				pk, err = x.Parse(kv.Key)
+				if err != nil {
+					return err
 				}
+
+				if !pk.IsSchema() {
+					return errors.Errorf("Expecting first key to be schema key: %+v", kv)
+				}
+
 				// Delete on all nodes.
 				p := &pb.Proposal{CleanPredicate: pk.Attr}
 				glog.Infof("Predicate being received: %v", pk.Attr)
@@ -106,7 +115,7 @@ func batchAndProposeKeyValues(ctx context.Context, kvs chan *pb.KVS) error {
 // for a predicate or not.
 func (w *grpcWorker) ReceivePredicate(stream pb.Worker_ReceivePredicateServer) error {
 	if !groups().Node.AmLeader() {
-		return x.Errorf("ReceivePredicate failed: Not the leader of group")
+		return errors.Errorf("ReceivePredicate failed: Not the leader of group")
 	}
 	// No new deletion/background cleanup would start after we start streaming tablet,
 	// so all the proposals for a particular tablet would atmost wait for deletion of
@@ -170,10 +179,10 @@ func (w *grpcWorker) MovePredicate(ctx context.Context,
 	if !n.AmLeader() {
 		return &emptyPayload, errNotLeader
 	}
-	if groups().gid != in.SourceGid {
+	if groups().groupId() != in.SourceGid {
 		return &emptyPayload,
-			x.Errorf("Group id doesn't match, received request for %d, my gid: %d",
-				in.SourceGid, groups().gid)
+			errors.Errorf("Group id doesn't match, received request for %d, my gid: %d",
+				in.SourceGid, groups().groupId())
 	}
 	if len(in.Predicate) == 0 {
 		return &emptyPayload, errEmptyPredicate
@@ -184,11 +193,13 @@ func (w *grpcWorker) MovePredicate(ctx context.Context,
 		return &emptyPayload, groups().Node.proposeAndWait(ctx, p)
 	}
 	if err := posting.Oracle().WaitForTs(ctx, in.TxnTs); err != nil {
-		return &emptyPayload, x.Errorf("While waiting for txn ts: %d. Error: %v", in.TxnTs, err)
+		return &emptyPayload, errors.Errorf("While waiting for txn ts: %d. Error: %v", in.TxnTs, err)
 	}
-	if servesTablet, err := groups().ServesTablet(in.Predicate); err != nil {
+	if gid, err := groups().BelongsTo(in.Predicate); err != nil {
 		return &emptyPayload, err
-	} else if !servesTablet {
+	} else if gid == 0 {
+		return &emptyPayload, errNonExistentTablet
+	} else if gid != groups().groupId() {
 		return &emptyPayload, errUnservedTablet
 	}
 
@@ -208,12 +219,12 @@ func movePredicateHelper(ctx context.Context, in *pb.MovePredicatePayload) error
 
 	pl := groups().Leader(in.DestGid)
 	if pl == nil {
-		return x.Errorf("Unable to find a connection for group: %d\n", in.DestGid)
+		return errors.Errorf("Unable to find a connection for group: %d\n", in.DestGid)
 	}
 	c := pb.NewWorkerClient(pl.Get())
 	s, err := c.ReceivePredicate(ctx)
 	if err != nil {
-		return fmt.Errorf("While calling ReceivePredicate: %+v", err)
+		return errors.Wrapf(err, "while calling ReceivePredicate")
 	}
 
 	// This txn is only reading the schema. Doesn't really matter what read timestamp we use,

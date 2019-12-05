@@ -30,8 +30,9 @@ import (
 
 	ostats "go.opencensus.io/stats"
 
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/badger/y"
+	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger/v2/y"
+	"github.com/dgraph-io/dgo/v2/protos/api"
 	"github.com/golang/glog"
 
 	"github.com/dgraph-io/dgraph/protos/pb"
@@ -43,7 +44,7 @@ var (
 )
 
 const (
-	MB = 1 << 20
+	mb = 1 << 20
 )
 
 // syncMarks stores the watermark for synced RAFT proposals. Each RAFT proposal consists
@@ -118,28 +119,35 @@ func updateMemoryMetrics(lc *y.Closer) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
+	update := func() {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+
+		inUse := ms.HeapInuse + ms.StackInuse
+		// From runtime/mstats.go:
+		// HeapIdle minus HeapReleased estimates the amount of memory
+		// that could be returned to the OS, but is being retained by
+		// the runtime so it can grow the heap without requesting more
+		// memory from the OS. If this difference is significantly
+		// larger than the heap size, it indicates there was a recent
+		// transient spike in live heap size.
+		idle := ms.HeapIdle - ms.HeapReleased
+
+		ostats.Record(context.Background(),
+			x.MemoryInUse.M(int64(inUse)),
+			x.MemoryIdle.M(int64(idle)),
+			x.MemoryProc.M(int64(getMemUsage())))
+	}
+	// Call update immediately so that Dgraph reports memory stats without
+	// having to wait for the first tick.
+	update()
+
 	for {
 		select {
 		case <-lc.HasBeenClosed():
 			return
 		case <-ticker.C:
-			var ms runtime.MemStats
-			runtime.ReadMemStats(&ms)
-
-			inUse := ms.HeapInuse + ms.StackInuse
-			// From runtime/mstats.go:
-			// HeapIdle minus HeapReleased estimates the amount of memory
-			// that could be returned to the OS, but is being retained by
-			// the runtime so it can grow the heap without requesting more
-			// memory from the OS. If this difference is significantly
-			// larger than the heap size, it indicates there was a recent
-			// transient spike in live heap size.
-			idle := ms.HeapIdle - ms.HeapReleased
-
-			ostats.Record(context.Background(),
-				x.MemoryInUse.M(int64(inUse)),
-				x.MemoryIdle.M(int64(idle)),
-				x.MemoryProc.M(int64(getMemUsage())))
+			update()
 		}
 	}
 }
@@ -156,34 +164,45 @@ func Init(ps *badger.DB) {
 	go updateMemoryMetrics(closer)
 }
 
+// Cleanup waits until the closer has finished processing.
 func Cleanup() {
 	closer.SignalAndWait()
 }
 
-// Get stores the List corresponding to key, if it's not there already.
-// to lru cache and returns it.
-//
-// plist := Get(key, group)
-// ... Use plist
-// TODO: This should take a node id and index. And just append all indices to a list.
-// When doing a commit, it should update all the sync index watermarks.
-// worker pkg would push the indices to the watermarks held by lists.
-// And watermark stuff would have to be located outside worker pkg, maybe in x.
-// That way, we don't have a dependency conflict.
+// GetNoStore returns the list stored in the key or creates a new one if it doesn't exist.
+// It does not store the list in any cache.
 func GetNoStore(key []byte) (rlist *List, err error) {
 	return getNew(key, pstore)
 }
 
+// LocalCache stores a cache of posting lists and deltas.
 // This doesn't sync, so call this only when you don't care about dirty posting lists in
 // memory(for example before populating snapshot) or after calling syncAllMarks
 type LocalCache struct {
 	sync.RWMutex
 
+	startTs uint64
+
+	// The keys for these maps is a string representation of the Badger key for the posting list.
+	// deltas keep track of the updates made by txn. These must be kept around until written to disk
+	// during commit.
+	deltas map[string][]byte
+
+	// max committed timestamp of the read posting lists.
+	maxVersions map[string]uint64
+
+	// plists are posting lists in memory. They can be discarded to reclaim space.
 	plists map[string]*List
 }
 
-func NewLocalCache() *LocalCache {
-	return &LocalCache{plists: make(map[string]*List)}
+// NewLocalCache returns a new LocalCache instance.
+func NewLocalCache(startTs uint64) *LocalCache {
+	return &LocalCache{
+		startTs:     startTs,
+		deltas:      make(map[string][]byte),
+		plists:      make(map[string]*List),
+		maxVersions: make(map[string]uint64),
+	}
 }
 
 func (lc *LocalCache) getNoStore(key string) *List {
@@ -195,7 +214,11 @@ func (lc *LocalCache) getNoStore(key string) *List {
 	return nil
 }
 
-func (lc *LocalCache) Set(key string, updated *List) *List {
+// SetIfAbsent adds the list for the specified key to the cache. If a list for the same
+// key already exists, the cache will not be modified and the existing list
+// will be returned instead. This behavior is meant to prevent the goroutines
+// using the cache from ending up with an orphaned version of a list.
+func (lc *LocalCache) SetIfAbsent(key string, updated *List) *List {
 	lc.Lock()
 	defer lc.Unlock()
 	if pl, ok := lc.plists[key]; ok {
@@ -205,7 +228,7 @@ func (lc *LocalCache) Set(key string, updated *List) *List {
 	return updated
 }
 
-func (lc *LocalCache) Get(key []byte) (*List, error) {
+func (lc *LocalCache) getInternal(key []byte, readFromDisk bool) (*List, error) {
 	if lc == nil {
 		return getNew(key, pstore)
 	}
@@ -214,9 +237,78 @@ func (lc *LocalCache) Get(key []byte) (*List, error) {
 		return pl, nil
 	}
 
-	pl, err := getNew(key, pstore)
-	if err != nil {
-		return nil, err
+	var pl *List
+	if readFromDisk {
+		var err error
+		pl, err = getNew(key, pstore)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		pl = &List{
+			key:         key,
+			mutationMap: make(map[uint64]*pb.PostingList),
+			plist:       new(pb.PostingList),
+		}
 	}
-	return lc.Set(skey, pl), nil
+
+	// If we just brought this posting list into memory and we already have a delta for it, let's
+	// apply it before returning the list.
+	lc.RLock()
+	if delta, ok := lc.deltas[skey]; ok && len(delta) > 0 {
+		pl.setMutation(lc.startTs, delta)
+	}
+	lc.RUnlock()
+	return lc.SetIfAbsent(skey, pl), nil
+}
+
+// Get retrieves the cached version of the list associated with the given key.
+func (lc *LocalCache) Get(key []byte) (*List, error) {
+	return lc.getInternal(key, true)
+}
+
+// GetFromDelta gets the cached version of the list without reading from disk
+// and only applies the existing deltas. This is used in situations where the
+// posting list will only be modified and not read (e.g adding index mutations).
+func (lc *LocalCache) GetFromDelta(key []byte) (*List, error) {
+	return lc.getInternal(key, false)
+}
+
+// UpdateDeltasAndDiscardLists updates the delta cache before removing the stored posting lists.
+func (lc *LocalCache) UpdateDeltasAndDiscardLists() {
+	lc.Lock()
+	defer lc.Unlock()
+	if len(lc.plists) == 0 {
+		return
+	}
+
+	for key, pl := range lc.plists {
+		data := pl.getMutation(lc.startTs)
+		if len(data) > 0 {
+			lc.deltas[key] = data
+		}
+		lc.maxVersions[key] = pl.maxVersion()
+		// We can't run pl.release() here because LocalCache is still being used by other callers
+		// for the same transaction, who might be holding references to posting lists.
+		// TODO: Find another way to reuse postings via postingPool.
+	}
+	lc.plists = make(map[string]*List)
+}
+
+func (lc *LocalCache) fillPreds(ctx *api.TxnContext, gid uint32) {
+	lc.RLock()
+	defer lc.RUnlock()
+	for key := range lc.deltas {
+		pk, err := x.Parse([]byte(key))
+		x.Check(err)
+		if len(pk.Attr) == 0 {
+			continue
+		}
+		// Also send the group id that the predicate was being served by. This is useful when
+		// checking if Zero should allow a commit during a predicate move.
+		predKey := fmt.Sprintf("%d-%s", gid, pk.Attr)
+		if !x.HasString(ctx.Preds, predKey) {
+			ctx.Preds = append(ctx.Preds, predKey)
+		}
+	}
 }

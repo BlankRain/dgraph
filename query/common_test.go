@@ -20,30 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
-	"github.com/dgraph-io/dgraph/x"
-	"github.com/dgraph-io/dgraph/z"
-	"google.golang.org/grpc"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"github.com/dgraph-io/dgraph/testutil"
 )
-
-func assignUids(num uint64) {
-	_, err := http.Get(fmt.Sprintf("http://"+z.SockAddrZeroHttp+"/assign?what=uids&num=%d", num))
-	if err != nil {
-		panic(fmt.Sprintf("Could not assign uids. Got error %v", err.Error()))
-	}
-}
-
-func getNewClient() *dgo.Dgraph {
-	conn, err := grpc.Dial(z.SockAddr, grpc.WithInsecure())
-	x.Check(err)
-	return dgo.NewDgraphClient(api.NewDgraphClient(conn))
-}
 
 func setSchema(schema string) {
 	err := client.Alter(context.Background(), &api.Operation{
@@ -63,7 +46,7 @@ func dropPredicate(pred string) {
 	}
 }
 
-func processQuery(t *testing.T, ctx context.Context, query string) (string, error) {
+func processQuery(ctx context.Context, t *testing.T, query string) (string, error) {
 	txn := client.NewTxn()
 	defer txn.Discard(ctx)
 
@@ -81,9 +64,19 @@ func processQuery(t *testing.T, ctx context.Context, query string) (string, erro
 }
 
 func processQueryNoErr(t *testing.T, query string) string {
-	res, err := processQuery(t, context.Background(), query)
+	res, err := processQuery(context.Background(), t, query)
 	require.NoError(t, err)
 	return res
+}
+
+// processQueryForMetrics works like processQuery but returns metrics instead of response.
+func processQueryForMetrics(t *testing.T, query string) *api.Metrics {
+	txn := client.NewTxn()
+	defer txn.Discard(context.Background())
+
+	res, err := txn.Query(context.Background(), query)
+	require.NoError(t, err)
+	return res.Metrics
 }
 
 func processQueryWithVars(t *testing.T, query string,
@@ -200,23 +193,52 @@ func addGeoMultiPolygonToCluster(uid uint64, polygons [][][][]float64) {
 
 const testSchema = `
 type Person {
-	name: string
-	pet: Animal
+	name
+	pet
 }
 
 type Animal {
-	name: string
+	name
 }
 
 type CarModel {
-	make: string
-	model: string
-	year: int
-	previous_model: CarModel
+	make
+	model
+	year
+	previous_model
+	<~previous_model>
+}
+
+type Object {
+	name
+	owner
+}
+
+type SchoolInfo {
+	name
+	abbr
+	school
+	district
+	state
+	county
+}
+
+type User {
+	name
+	password
+}
+
+type Node {
+	node
+	name
 }
 
 name                           : string @index(term, exact, trigram) @count @lang .
+name_lang					   : string @lang .
+lang_type                      : string @index(exact) .
+alt_name                       : [string] @index(term, exact, trigram) @count .
 alias                          : string @index(exact, term, fulltext) .
+abbr                           : string .
 dob                            : dateTime @index(year) .
 dob_day                        : dateTime @index(day) .
 film.film.initial_release_date : dateTime @index(year) .
@@ -246,12 +268,23 @@ office.room                    : [uid] .
 best_friend                    : uid @reverse .
 pet                            : [uid] .
 node                           : [uid] .
-model                          : string @index(term) .
+model                          : string @index(term) @lang .
 make                           : string @index(term) .
 year                           : int .
 previous_model                 : uid @reverse .
 created_at                     : datetime @index(hour) .
 updated_at                     : datetime @index(year) .
+number                         : int @index(int) .
+district                       : [uid] .
+state                          : [uid] .
+county                         : [uid] .
+firstName                      : string .
+lastName                       : string .
+newname                        : string @index(exact, term) .
+newage                         : int .
+boss                           : uid .
+newfriend                      : [uid] .
+owner                          : [uid] .
 `
 
 func populateCluster() {
@@ -261,7 +294,7 @@ func populateCluster() {
 	}
 
 	setSchema(testSchema)
-	assignUids(100000)
+	testutil.AssignUids(100000)
 
 	addTriplesToCluster(`
 		<1> <name> "Michonne" .
@@ -271,6 +304,7 @@ func populateCluster() {
 		<5> <name> "Garfield" .
 		<6> <name> "Bear" .
 		<7> <name> "Nemo" .
+		<11> <name> "name" .
 		<23> <name> "Rick Grimes" .
 		<24> <name> "Glenn Rhee" .
 		<25> <name> "Daryl Dixon" .
@@ -326,7 +360,12 @@ func populateCluster() {
 		<10005> <name> "Bob" .
 		<10006> <name> "Colin" .
 		<10007> <name> "Elizabeth" .
-
+		<10101> <name_lang> "zon"@sv .
+		<10101> <name_lang> "öffnen"@de .
+		<10101> <lang_type> "Test" .
+		<10102> <name_lang> "öppna"@sv .
+		<10102> <name_lang> "zumachen"@de .
+		<10102> <lang_type> "Test" .
 		<11000> <name> "Baz Luhrmann"@en .
 		<11001> <name> "Strictly Ballroom"@en .
 		<11002> <name> "Puccini: La boheme (Sydney Opera)"@en .
@@ -491,6 +530,7 @@ func populateCluster() {
 		<23> <shadow_deep> "4" .
 		<24> <shadow_deep> "14" .
 
+		<1> <dgraph.type> "User" .
 		<2> <dgraph.type> "Person" .
 		<3> <dgraph.type> "Person" .
 		<4> <dgraph.type> "Person" .
@@ -498,6 +538,12 @@ func populateCluster() {
 		<5> <dgraph.type> "Pet" .
 		<6> <dgraph.type> "Animal" .
 		<6> <dgraph.type> "Pet" .
+		<32> <dgraph.type> "SchoolInfo" .
+		<33> <dgraph.type> "SchoolInfo" .
+		<34> <dgraph.type> "SchoolInfo" .
+		<35> <dgraph.type> "SchoolInfo" .
+		<36> <dgraph.type> "SchoolInfo" .
+		<11100> <dgraph.type> "Node" .
 
 		<2> <pet> <5> .
 		<3> <pet> <6> .
@@ -522,6 +568,66 @@ func populateCluster() {
 		<201> <year> "2009" .
 		<201> <dgraph.type> "CarModel" .
 		<201> <previous_model> <200> .
+
+		<202> <name> "Car" .
+		<202> <make> "Toyota" .
+		<202> <year> "2009" .
+		<202> <model> "Prius" .
+		<202> <model> "プリウス"@jp .
+		<202> <owner> <203> .
+		<202> <dgraph.type> "CarModel" .
+		<202> <dgraph.type> "Object" .
+
+		# data for regexp testing
+		_:luke <firstName> "Luke" .
+		_:luke <lastName> "Skywalker" .
+		_:leia <firstName> "Princess" .
+		_:leia <lastName> "Leia" .
+		_:han <firstName> "Han" .
+		_:han <lastName> "Solo" .
+		_:har <firstName> "Harrison" .
+		_:har <lastName> "Ford" .
+		_:ss <firstName> "Steven" .
+		_:ss <lastName> "Spielberg" .
+
+		<501> <newname> "P1" .
+		<502> <newname> "P2" .
+		<503> <newname> "P3" .
+		<504> <newname> "P4" .
+		<505> <newname> "P5" .
+		<506> <newname> "P6" .
+		<507> <newname> "P7" .
+		<508> <newname> "P8" .
+		<509> <newname> "P9" .
+		<510> <newname> "P10" .
+		<511> <newname> "P11" .
+		<512> <newname> "P12" .
+
+		<501> <newage> "21" .
+		<502> <newage> "22" .
+		<503> <newage> "23" .
+		<504> <newage> "24" .
+		<505> <newage> "25" .
+		<506> <newage> "26" .
+		<507> <newage> "27" .
+		<508> <newage> "28" .
+		<509> <newage> "29" .
+		<510> <newage> "30" .
+		<511> <newage> "31" .
+		<512> <newage> "32" .
+
+		<501> <newfriend> <502> .
+		<501> <newfriend> <503> .
+		<501> <boss> <504> .
+		<502> <newfriend> <505> .
+		<502> <newfriend> <506> .
+		<503> <newfriend> <507> .
+		<503> <newfriend> <508> .
+		<504> <newfriend> <509> .
+		<504> <newfriend> <510> .
+		<502> <boss> <510> .
+		<510> <newfriend> <511> .
+		<510> <newfriend> <512> .
 	`)
 
 	addGeoPointToCluster(1, "loc", []float64{1.1, 2.0})

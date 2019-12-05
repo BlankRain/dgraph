@@ -21,7 +21,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dgraph-io/badger"
+	"github.com/dgraph-io/badger/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/dgraph/protos/pb"
@@ -57,10 +57,6 @@ func TestSchema(t *testing.T) {
 		{"name", &pb.SchemaUpdate{
 			Predicate: "name",
 			ValueType: pb.Posting_STRING,
-		}},
-		{"_predicate_", &pb.SchemaUpdate{
-			ValueType: pb.Posting_STRING,
-			List:      true,
 		}},
 		{"address", &pb.SchemaUpdate{
 			Predicate: "address",
@@ -173,10 +169,6 @@ friend  : [uid] @reverse @count .
 func TestSchemaIndexCustom(t *testing.T) {
 	require.NoError(t, ParseBytes([]byte(schemaIndexVal5), 1))
 	checkSchema(t, State().predicate, []nameType{
-		{"_predicate_", &pb.SchemaUpdate{
-			ValueType: pb.Posting_STRING,
-			List:      true,
-		}},
 		{"name", &pb.SchemaUpdate{
 			Predicate: "name",
 			ValueType: pb.Posting_STRING,
@@ -220,7 +212,7 @@ func TestParse2(t *testing.T) {
 	reset()
 	result, err := Parse("")
 	require.NoError(t, err)
-	require.Nil(t, result.Schemas)
+	require.Nil(t, result.Preds)
 }
 
 func TestParse3_Error(t *testing.T) {
@@ -281,26 +273,26 @@ func TestParseScalarList(t *testing.T) {
 		graduation: [dateTime] .
 	`)
 	require.NoError(t, err)
-	require.Equal(t, 3, len(result.Schemas))
+	require.Equal(t, 3, len(result.Preds))
 	require.EqualValues(t, &pb.SchemaUpdate{
 		Predicate: "jobs",
 		ValueType: 9,
 		Directive: pb.SchemaUpdate_INDEX,
 		Tokenizer: []string{"term"},
 		List:      true,
-	}, result.Schemas[0])
+	}, result.Preds[0])
 
 	require.EqualValues(t, &pb.SchemaUpdate{
 		Predicate: "occupations",
 		ValueType: 9,
 		List:      true,
-	}, result.Schemas[1])
+	}, result.Preds[1])
 
 	require.EqualValues(t, &pb.SchemaUpdate{
 		Predicate: "graduation",
 		ValueType: 5,
 		List:      true,
-	}, result.Schemas[2])
+	}, result.Preds[2])
 }
 
 func TestParseScalarListError1(t *testing.T) {
@@ -338,12 +330,12 @@ func TestParseUidList(t *testing.T) {
 		friend: [uid] .
 	`)
 	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Schemas))
+	require.Equal(t, 1, len(result.Preds))
 	require.EqualValues(t, &pb.SchemaUpdate{
 		Predicate: "friend",
 		ValueType: 7,
 		List:      true,
-	}, result.Schemas[0])
+	}, result.Preds[0])
 }
 
 func TestParseUidSingleValue(t *testing.T) {
@@ -352,12 +344,12 @@ func TestParseUidSingleValue(t *testing.T) {
 		friend: uid .
 	`)
 	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Schemas))
+	require.Equal(t, 1, len(result.Preds))
 	require.EqualValues(t, &pb.SchemaUpdate{
 		Predicate: "friend",
 		ValueType: 7,
 		List:      false,
-	}, result.Schemas[0])
+	}, result.Preds[0])
 }
 func TestParseUnderscore(t *testing.T) {
 	reset()
@@ -389,11 +381,24 @@ func TestParseEmptyType(t *testing.T) {
 
 }
 
+func TestParseTypeEOF(t *testing.T) {
+	reset()
+	result, err := Parse(`
+		type Person {
+		}`)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(result.Types))
+	require.Equal(t, &pb.TypeUpdate{
+		TypeName: "Person",
+	}, result.Types[0])
+
+}
+
 func TestParseSingleType(t *testing.T) {
 	reset()
 	result, err := Parse(`
 		type Person {
-			Name: string
+			name
 		}
 	`)
 	require.NoError(t, err)
@@ -402,33 +407,7 @@ func TestParseSingleType(t *testing.T) {
 		TypeName: "Person",
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
-			},
-		},
-	}, result.Types[0])
-}
-
-func TestParseBaseTypesCaseInsensitive(t *testing.T) {
-	reset()
-	result, err := Parse(`
-		type Person {
-			Name: string
-			LastName: String
-		}
-	`)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Types))
-	require.Equal(t, &pb.TypeUpdate{
-		TypeName: "Person",
-		Fields: []*pb.SchemaUpdate{
-			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
-			},
-			{
-				Predicate: "LastName",
-				ValueType: pb.Posting_STRING,
+				Predicate: "name",
 			},
 		},
 	}, result.Types[0])
@@ -438,19 +417,24 @@ func TestParseCombinedSchemasAndTypes(t *testing.T) {
 	reset()
 	result, err := Parse(`
 		type Person {
-
+			name
 		}
         name: string .
 	`)
 	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Schemas))
+	require.Equal(t, 1, len(result.Preds))
 	require.Equal(t, &pb.SchemaUpdate{
 		Predicate: "name",
 		ValueType: 9,
-	}, result.Schemas[0])
+	}, result.Preds[0])
 	require.Equal(t, 1, len(result.Types))
 	require.Equal(t, &pb.TypeUpdate{
 		TypeName: "Person",
+		Fields: []*pb.SchemaUpdate{
+			{
+				Predicate: "name",
+			},
+		},
 	}, result.Types[0])
 }
 
@@ -458,10 +442,10 @@ func TestParseMultipleTypes(t *testing.T) {
 	reset()
 	result, err := Parse(`
 		type Person {
-			Name: string
+			name
 		}
 		type Animal {
-			Name: string
+			name
 		}
 	`)
 	require.NoError(t, err)
@@ -470,8 +454,7 @@ func TestParseMultipleTypes(t *testing.T) {
 		TypeName: "Person",
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
+				Predicate: "name",
 			},
 		},
 	}, result.Types[0])
@@ -479,20 +462,31 @@ func TestParseMultipleTypes(t *testing.T) {
 		TypeName: "Animal",
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
+				Predicate: "name",
 			},
 		},
 	}, result.Types[1])
 }
 
-func TestParseObjectType(t *testing.T) {
+func TestParseTypeDuplicateFields(t *testing.T) {
+	reset()
+	_, err := Parse(`
+		type Person {
+			name
+			name
+		}
+	`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Duplicate fields with name: name")
+}
+
+func TestOldTypeFormat(t *testing.T) {
 	reset()
 	result, err := Parse(`
 		type Person {
-			Father: Person
-			Mother: Person
-			Children: [Person]
+			name: [string!]!
+			address: string!
+			children: [Person]
 		}
 	`)
 	require.NoError(t, err)
@@ -501,32 +495,24 @@ func TestParseObjectType(t *testing.T) {
 		TypeName: "Person",
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate:      "Father",
-				ValueType:      pb.Posting_OBJECT,
-				ObjectTypeName: "Person",
+				Predicate: "name",
 			},
 			{
-				Predicate:      "Mother",
-				ValueType:      pb.Posting_OBJECT,
-				ObjectTypeName: "Person",
+				Predicate: "address",
 			},
 			{
-				Predicate:      "Children",
-				ValueType:      pb.Posting_OBJECT,
-				ObjectTypeName: "Person",
-				List:           true,
+				Predicate: "children",
 			},
 		},
 	}, result.Types[0])
 }
 
-func TestParseScalarType(t *testing.T) {
+func TestOldAndNewTypeFormat(t *testing.T) {
 	reset()
 	result, err := Parse(`
 		type Person {
-			Name: string
-			Nickname: [String]
-			Alive: Bool
+			name: [string!]!
+			address
 		}
 	`)
 	require.NoError(t, err)
@@ -535,133 +521,10 @@ func TestParseScalarType(t *testing.T) {
 		TypeName: "Person",
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
+				Predicate: "name",
 			},
 			{
-				Predicate: "Nickname",
-				ValueType: pb.Posting_STRING,
-				List:      true,
-			},
-			{
-				Predicate: "Alive",
-				ValueType: pb.Posting_BOOL,
-			},
-		},
-	}, result.Types[0])
-}
-
-func TestParseCombinedTypes(t *testing.T) {
-	reset()
-	result, err := Parse(`
-		type Person {
-			Name: string
-			Nickname: [string]
-			Parents: [Person]
-		}
-	`)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Types))
-	require.Equal(t, &pb.TypeUpdate{
-		TypeName: "Person",
-		Fields: []*pb.SchemaUpdate{
-			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
-			},
-			{
-				Predicate: "Nickname",
-				ValueType: pb.Posting_STRING,
-				List:      true,
-			},
-			{
-				Predicate:      "Parents",
-				ValueType:      pb.Posting_OBJECT,
-				ObjectTypeName: "Person",
-				List:           true,
-			},
-		},
-	}, result.Types[0])
-}
-
-func TestParseNonNullableScalar(t *testing.T) {
-	reset()
-	result, err := Parse(`
-		type Person {
-			Name: string!
-			Nickname: [string]
-		}
-	`)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Types))
-	require.Equal(t, &pb.TypeUpdate{
-		TypeName: "Person",
-		Fields: []*pb.SchemaUpdate{
-			{
-				Predicate:   "Name",
-				ValueType:   pb.Posting_STRING,
-				NonNullable: true,
-			},
-			{
-				Predicate: "Nickname",
-				ValueType: pb.Posting_STRING,
-				List:      true,
-			},
-		},
-	}, result.Types[0])
-}
-
-func TestParseNonNullableList(t *testing.T) {
-	reset()
-	result, err := Parse(`
-		type Person {
-			Name: string
-			Nickname: [string]!
-		}
-	`)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Types))
-	require.Equal(t, &pb.TypeUpdate{
-		TypeName: "Person",
-		Fields: []*pb.SchemaUpdate{
-			{
-				Predicate: "Name",
-				ValueType: pb.Posting_STRING,
-			},
-			{
-				Predicate:       "Nickname",
-				ValueType:       pb.Posting_STRING,
-				List:            true,
-				NonNullableList: true,
-			},
-		},
-	}, result.Types[0])
-}
-
-func TestParseNonNullableScalarAndList(t *testing.T) {
-	reset()
-	result, err := Parse(`
-		type Person {
-			Name: string!
-			Nickname: [string!]!
-		}
-	`)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(result.Types))
-	require.Equal(t, &pb.TypeUpdate{
-		TypeName: "Person",
-		Fields: []*pb.SchemaUpdate{
-			{
-				Predicate:   "Name",
-				ValueType:   pb.Posting_STRING,
-				NonNullable: true,
-			},
-			{
-				Predicate:       "Nickname",
-				ValueType:       pb.Posting_STRING,
-				List:            true,
-				NonNullable:     true,
-				NonNullableList: true,
+				Predicate: "address",
 			},
 		},
 	}, result.Types[0])
@@ -671,76 +534,9 @@ func TestParseTypeErrMissingNewLine(t *testing.T) {
 	reset()
 	_, err := Parse(`
 		type Person {
-		}type Animal {}
-	`)
+		}type Animal {}`)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "Expected new line after type declaration")
-}
-
-func TestParseTypeErrMissingColon(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name string
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Missing colon in type declaration")
-}
-
-func TestParseTypeErrMultipleTypes(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name: bool string
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Expected new line after field declaration")
-}
-
-func TestParseTypeErrMultipleExclamationMarks(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name: bool!!
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Expected new line after field declaration")
-}
-
-func TestParseTypeErrMissingSquareBracket(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name: [string
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Expected matching square bracket")
-}
-
-func TestParseTypeErrMultipleSquareBrackets(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name: [[string]]
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Missing field type in type declaration")
-}
-
-func TestParseTypeErrMissingType(t *testing.T) {
-	reset()
-	_, err := Parse(`
-		type Person {
-			Name:
-		}
-	`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Missing field type in type declaration")
+	require.Contains(t, err.Error(), "Expected new line or EOF after type declaration")
 }
 
 func TestParseComments(t *testing.T) {
@@ -794,7 +590,7 @@ func TestParseTypeComments(t *testing.T) {
 		# User is a service user
 		type User {
 			# TODO: add more fields
-			Name: string # e.g., srfrog
+			name # e.g., srfrog
 									 # expanded comment
 									 # embedded # comments # here
 		}
@@ -810,9 +606,7 @@ func TestMain(m *testing.M) {
 
 	dir, err := ioutil.TempDir("", "storetest_")
 	x.Check(err)
-	kvOpt := badger.DefaultOptions
-	kvOpt.Dir = dir
-	kvOpt.ValueDir = dir
+	kvOpt := badger.DefaultOptions(dir)
 	ps, err = badger.OpenManaged(kvOpt)
 	x.Check(err)
 	Init(ps)

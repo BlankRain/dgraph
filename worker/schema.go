@@ -17,10 +17,10 @@
 package worker
 
 import (
+	"github.com/pkg/errors"
 	otrace "go.opencensus.io/trace"
 	"golang.org/x/net/context"
 
-	"github.com/dgraph-io/dgo/protos/api"
 	"github.com/dgraph-io/dgraph/conn"
 	"github.com/dgraph-io/dgraph/protos/pb"
 	"github.com/dgraph-io/dgraph/schema"
@@ -76,8 +76,8 @@ func getSchema(ctx context.Context, s *pb.SchemaRequest) (*pb.SchemaResult, erro
 }
 
 // populateSchema returns the information of asked fields for given attribute
-func populateSchema(attr string, fields []string) *api.SchemaNode {
-	var schemaNode api.SchemaNode
+func populateSchema(attr string, fields []string) *pb.SchemaNode {
+	var schemaNode pb.SchemaNode
 	var typ types.TypeID
 	var err error
 	if typ, err = schema.State().TypeOf(attr); err != nil {
@@ -116,9 +116,12 @@ func populateSchema(attr string, fields []string) *api.SchemaNode {
 // empty then it adds all known groups
 func addToSchemaMap(schemaMap map[uint32]*pb.SchemaRequest, schema *pb.SchemaRequest) error {
 	for _, attr := range schema.Predicates {
-		gid, err := groups().BelongsTo(attr)
+		gid, err := groups().BelongsToReadOnly(attr)
 		if err != nil {
 			return err
+		}
+		if gid == 0 {
+			continue
 		}
 
 		s := schemaMap[gid]
@@ -172,7 +175,9 @@ func getSchemaOverNetwork(ctx context.Context, gid uint32, s *pb.SchemaRequest, 
 
 // GetSchemaOverNetwork checks which group should be serving the schema
 // according to fingerprint of the predicate and sends it to that instance.
-func GetSchemaOverNetwork(ctx context.Context, schema *pb.SchemaRequest) ([]*api.SchemaNode, error) {
+func GetSchemaOverNetwork(ctx context.Context, schema *pb.SchemaRequest) (
+	[]*pb.SchemaNode, error) {
+
 	ctx, span := otrace.StartSpan(ctx, "worker.GetSchemaOverNetwork")
 	defer span.End()
 
@@ -191,12 +196,9 @@ func GetSchemaOverNetwork(ctx context.Context, schema *pb.SchemaRequest) ([]*api
 	}
 
 	results := make(chan resultErr, len(schemaMap))
-	var schemaNodes []*api.SchemaNode
+	var schemaNodes []*pb.SchemaNode
 
 	for gid, s := range schemaMap {
-		if gid == 0 {
-			return schemaNodes, errUnservedTablet
-		}
 		go getSchemaOverNetwork(ctx, gid, s, results)
 	}
 
@@ -224,7 +226,7 @@ func (w *grpcWorker) Schema(ctx context.Context, s *pb.SchemaRequest) (*pb.Schem
 	}
 
 	if !groups().ServesGroup(s.GroupId) {
-		return &emptySchemaResult, x.Errorf("This server doesn't serve group id: %v", s.GroupId)
+		return &emptySchemaResult, errors.Errorf("This server doesn't serve group id: %v", s.GroupId)
 	}
 	return getSchema(ctx, s)
 }

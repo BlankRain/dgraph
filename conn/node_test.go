@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/badger"
+	"github.com/dgraph-io/badger/v2"
 	"github.com/dgraph-io/dgraph/protos/pb"
 	"github.com/dgraph-io/dgraph/raftwal"
 	"github.com/stretchr/testify/require"
@@ -33,14 +33,6 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 	"golang.org/x/net/context"
 )
-
-func openBadger(dir string) (*badger.DB, error) {
-	opt := badger.DefaultOptions
-	opt.Dir = dir
-	opt.ValueDir = dir
-
-	return badger.Open(opt)
-}
 
 func (n *Node) run(wg *sync.WaitGroup) {
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -73,7 +65,7 @@ func TestProposal(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
-	db, err := openBadger(dir)
+	db, err := badger.Open(badger.DefaultOptions(dir))
 	require.NoError(t, err)
 	store := raftwal.Init(db, 0, 0)
 

@@ -17,7 +17,6 @@
 package worker
 
 import (
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -31,6 +30,7 @@ import (
 	tag "go.opencensus.io/tag"
 	otrace "go.opencensus.io/trace"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
@@ -124,7 +124,7 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 	}()
 
 	if n.Raft() == nil {
-		return x.Errorf("Raft isn't initialized yet")
+		return errors.Errorf("Raft isn't initialized yet")
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -136,7 +136,9 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 	checkTablet := func(pred string) error {
 		if tablet, err := groups().Tablet(pred); err != nil {
 			return err
-		} else if tablet == nil || tablet.GroupId != groups().groupId() {
+		} else if tablet == nil || tablet.GroupId == 0 {
+			return errNonExistentTablet
+		} else if tablet.GroupId != groups().groupId() {
 			return errUnservedTablet
 		}
 		return nil
@@ -157,6 +159,7 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 				return err
 			}
 		}
+
 		for _, schema := range proposal.Mutations.Schema {
 			if err := checkTablet(schema.Predicate); err != nil {
 				return err
@@ -165,11 +168,6 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 				return err
 			}
 			noTimeout = true
-		}
-		for _, typ := range proposal.Mutations.Types {
-			if err := checkType(typ); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -187,10 +185,10 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 		cctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		che := make(chan error, 1)
+		errCh := make(chan error, 1)
 		pctx := &conn.ProposalCtx{
-			Ch:  che,
-			Ctx: cctx,
+			ErrCh: errCh,
+			Ctx:   cctx,
 		}
 		x.AssertTruef(n.Proposals.Store(key, pctx), "Found existing proposal with key: [%v]", key)
 		defer n.Proposals.Delete(key) // Ensure that it gets deleted on return.
@@ -201,7 +199,7 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 			return err
 		}
 		if err = n.Raft().Propose(cctx, data); err != nil {
-			return x.Wrapf(err, "While proposing")
+			return errors.Wrapf(err, "While proposing")
 		}
 
 		timer := time.NewTimer(timeout)
@@ -209,7 +207,7 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 
 		for {
 			select {
-			case err = <-che:
+			case err = <-errCh:
 				// We arrived here by a call to n.Proposals.Done().
 				return err
 			case <-ctx.Done():
@@ -227,12 +225,18 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 		}
 	}
 
-	// Some proposals, like schema updates can take a long time to apply. Let's
-	// not do the retry mechanism on them. Instead, we can set a long timeout of
-	// 20 minutes.
+	// Some proposals, like schema updates are very expensive to retry. So, let's
+	// not do the retry mechanism on them. Instead, we can set a long timeout.
+	//
+	// Note that timeout only affects how long it takes us to find the proposal back via Raft logs.
+	// It does not consider the amount of time it takes to actually apply the proposal.
+	//
+	// Based on updated logic, once we find the proposal in the raft log, we would not cancel it
+	// anyways. Instead, we'd let the proposal run its course.
 	if noTimeout {
-		return propose(20 * time.Minute)
+		return propose(3 * time.Minute)
 	}
+
 	// Some proposals can be stuck if leader change happens. For e.g. MsgProp message from follower
 	// to leader can be dropped/end up appearing with empty Data in CommittedEntries.
 	// Having a timeout here prevents the mutation being stuck forever in case they don't have a
@@ -243,10 +247,17 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 	for i := 0; i < 3; i++ {
 		// Each retry creates a new proposal, which adds to the number of pending proposals. We
 		// should consider this into account, when adding new proposals to the system.
-		if err := limiter.incr(ctx, i); err != nil {
-			return err
+		switch {
+		case proposal.Delta != nil: // Is a delta.
+			// If a proposal is important (like delta updates), let's not run it via the limiter
+			// below. We should always propose it irrespective of how many pending proposals there
+			// might be.
+		default:
+			if err := limiter.incr(ctx, i); err != nil {
+				return err
+			}
+			defer limiter.decr(i)
 		}
-		defer limiter.decr(i)
 
 		if err := propose(newTimeout(i)); err != errInternalRetry {
 			return err

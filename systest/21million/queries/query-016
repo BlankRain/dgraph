@@ -1,7 +1,7 @@
 {
-  genre(func: gt(count(~genre), 30000)){
+  genre(func: gt(count(~genre), 30000)) {
     name@en
-    ~genre (first:1) {
+    ~genre (first:1, orderasc: name@en) {
       name@en
     }
   }
@@ -13,7 +13,7 @@
       "name@en": "Documentary film",
       "~genre": [
         {
-          "name@en": "Thaumazein"
+          "name@en": "!Women Art Revolution"
         }
       ]
     },
@@ -21,7 +21,7 @@
       "name@en": "Drama",
       "~genre": [
         {
-          "name@en": "L'ennemi naturel"
+          "name@en": "-30-"
         }
       ]
     },
@@ -29,7 +29,7 @@
       "name@en": "Comedy",
       "~genre": [
         {
-          "name@en": "La Bouillabaisse"
+          "name@en": "¡ El Presidente !"
         }
       ]
     },
@@ -37,7 +37,7 @@
       "name@en": "Short Film",
       "~genre": [
         {
-          "name@en": "Checkmate, Keep Your Enemies Closer"
+          "name@en": ":08 Min. Core Workouts"
         }
       ]
     }

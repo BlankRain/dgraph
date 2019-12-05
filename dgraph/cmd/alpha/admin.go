@@ -25,10 +25,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/dgraph-io/dgraph/edgraph"
 	"github.com/dgraph-io/dgraph/posting"
 	"github.com/dgraph-io/dgraph/worker"
 	"github.com/dgraph-io/dgraph/x"
+	"github.com/golang/glog"
 )
 
 // handlerInit does some standard checks. Returns false if something is wrong.
@@ -46,6 +46,29 @@ func handlerInit(w http.ResponseWriter, r *http.Request, method string) bool {
 	return true
 }
 
+func drainingHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPut, http.MethodPost:
+		enableStr := r.URL.Query().Get("enable")
+
+		enable, err := strconv.ParseBool(enableStr)
+		if err != nil {
+			x.SetStatus(w, x.ErrorInvalidRequest,
+				"Found invalid value for the enable parameter")
+			return
+		}
+
+		x.UpdateDrainingMode(enable)
+		_, err = w.Write([]byte(fmt.Sprintf(`{"code": "Success",`+
+			`"message": "draining mode has been set to %v"}`, enable)))
+		if err != nil {
+			glog.Errorf("Failed to write response: %v", err)
+		}
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func shutDownHandler(w http.ResponseWriter, r *http.Request) {
 	if !handlerInit(w, r, http.MethodGet) {
 		return
@@ -60,8 +83,25 @@ func exportHandler(w http.ResponseWriter, r *http.Request) {
 	if !handlerInit(w, r, http.MethodGet) {
 		return
 	}
-	// Export logic can be moved to dgraphzero.
-	if err := worker.ExportOverNetwork(context.Background()); err != nil {
+	if err := r.ParseForm(); err != nil {
+		x.SetHttpStatus(w, http.StatusBadRequest, "Parse of export request failed.")
+		return
+	}
+
+	format := worker.DefaultExportFormat
+	if vals, ok := r.Form["format"]; ok {
+		if len(vals) > 1 {
+			x.SetHttpStatus(w, http.StatusBadRequest,
+				"Only one export format may be specified.")
+			return
+		}
+		format = worker.NormalizeExportFormat(vals[0])
+		if format == "" {
+			x.SetHttpStatus(w, http.StatusBadRequest, "Invalid export format.")
+			return
+		}
+	}
+	if err := worker.ExportOverNetwork(context.Background(), format); err != nil {
 		x.SetStatus(w, err.Error(), "Export failed.")
 		return
 	}
@@ -91,9 +131,9 @@ func memoryLimitPutHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if memoryMB < edgraph.MinAllottedMemory {
+	if memoryMB < worker.MinAllottedMemory {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "lru_mb must be at least %.0f\n", edgraph.MinAllottedMemory)
+		fmt.Fprintf(w, "lru_mb must be at least %.0f\n", worker.MinAllottedMemory)
 		return
 	}
 

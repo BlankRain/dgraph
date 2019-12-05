@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +32,7 @@ import (
 
 	"github.com/dgraph-io/dgraph/x"
 	"github.com/golang/glog"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,7 +88,7 @@ func matchExportCount(opts matchExport) error {
 	}
 	expected := `{"code": "Success", "message": "Export completed."}`
 	if string(b) != expected {
-		return x.Errorf("Unexpected message while exporting: %v", string(b))
+		return errors.Errorf("Unexpected message while exporting: %v", string(b))
 	}
 
 	dataFile, err := findFile(filepath.Join(opts.dir, "export"), ".rdf.gz")
@@ -102,7 +102,7 @@ func matchExportCount(opts matchExport) error {
 	}
 	count := strings.TrimSpace(string(out))
 	if count != strconv.Itoa(opts.expectedRDF) {
-		return x.Errorf("Export count mismatch. Got: %s", count)
+		return errors.Errorf("Export count mismatch. Got: %s", count)
 	}
 
 	schemaFile, err := findFile(filepath.Join(opts.dir, "export"), ".schema.gz")
@@ -116,7 +116,7 @@ func matchExportCount(opts matchExport) error {
 	}
 	count = strings.TrimSpace(string(out))
 	if count != strconv.Itoa(opts.expectedSchema) {
-		return x.Errorf("Schema export count mismatch. Got: %s", count)
+		return errors.Errorf("Schema export count mismatch. Got: %s", count)
 	}
 	glog.Infoln("Export count matched.")
 	return nil
@@ -146,13 +146,13 @@ func waitForNodeToBeHealthy(t *testing.T, port int) {
 func restart(cmd *exec.Cmd) error {
 	cmd.Process.Signal(syscall.SIGINT)
 	if _, err := cmd.Process.Wait(); err != nil {
-		return x.Errorf("Error while waiting for Dgraph process to be killed: %v", err)
+		return errors.Wrapf(err, "while waiting for Dgraph process to be killed")
 	}
 
 	cmd.Process = nil
 	glog.Infoln("Trying to restart Dgraph Alpha")
 	if err := cmd.Start(); err != nil {
-		return x.Errorf("Couldn't start Dgraph alpha again: %v\n", err)
+		return errors.Wrapf(err, "couldn't start Dgraph alpha again")
 	}
 	return nil
 }
@@ -188,7 +188,7 @@ func DONOTRUNTestClusterSnapshot(t *testing.T) {
 	// So that snapshot happens and everything is persisted to disk.
 	if err := restart(cluster.dgraph); err != nil {
 		//		shutdownCluster()
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	waitForNodeToBeHealthy(t, cluster.alphaPortOffset+x.PortHTTP)
 	waitForConvergence(t, cluster)
@@ -237,7 +237,7 @@ func DONOTRUNTestClusterSnapshot(t *testing.T) {
 	cmd.Process.Signal(syscall.SIGINT)
 	if _, err := cmd.Process.Wait(); err != nil {
 		shutdownCluster()
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 
 	// We wait so that after restart n becomes leader.
@@ -247,7 +247,7 @@ func DONOTRUNTestClusterSnapshot(t *testing.T) {
 	glog.Infoln("Trying to restart Dgraph Alpha")
 	if err := cmd.Start(); err != nil {
 		shutdownCluster()
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 
 	waitForNodeToBeHealthy(t, cluster.alphaPortOffset+x.PortHTTP)

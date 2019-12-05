@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
 	"io/ioutil"
+	"testing"
 
-	"github.com/dgraph-io/dgo"
-	"github.com/dgraph-io/dgo/protos/api"
-	"github.com/dgraph-io/dgraph/z"
-	"github.com/golang/glog"
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"github.com/dgraph-io/dgraph/testutil"
+	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -33,7 +33,7 @@ func generateCertPool(certPath string, useSystemCA bool) (*x509.CertPool, error)
 			return nil, err
 		}
 		if !pool.AppendCertsFromPEM(caFile) {
-			return nil, fmt.Errorf("error reading CA file %q", certPath)
+			return nil, errors.Errorf("error reading CA file %q", certPath)
 		}
 	}
 
@@ -94,17 +94,17 @@ func dgraphClientWithCerts(serviceAddr string, conf *viper.Viper) (*dgo.Dgraph, 
 	return dg, nil
 }
 
-func ExampleLoginOverTLS() {
+func TestLoginOverTLS(t *testing.T) {
 	conf := viper.New()
 	conf.Set("tls_cacert", "../tls/ca.crt")
 	conf.Set("tls_server_name", "node")
 
-	dg, err := dgraphClientWithCerts(z.SockAddr, conf)
+	dg, err := dgraphClientWithCerts(testutil.SockAddr, conf)
 	if err != nil {
-		glog.Fatalf("Unable to get dgraph client: %v", err)
+		t.Fatalf("Unable to get dgraph client: %s", err.Error())
 	}
 	if err := dg.Login(context.Background(), "groot", "password"); err != nil {
-		glog.Fatalf("Unable to login using the groot account: %v", err)
+		t.Fatalf("Unable to login using the groot account: %v", err.Error())
 	}
 
 	// Output:
